@@ -45,6 +45,28 @@
   let renderToc;
   // 是否处于编辑模式
   let isEditMode = false;
+
+  // 一次性迁移：项目由 LightMDKit 更名为 MarkdownLite，localStorage 的键前缀随之改变。
+  // 不搬的话，老用户存过的「现代模式 / 侧边栏视图 / 自动保存」偏好会静默丢失、各自退回
+  // 默认值 —— 表现出来就是「本来常用现代模式，某天打开却变成传统模式：编辑器不出现，
+  // 点正文既没有光标也编辑不了」，很容易被当成编辑器坏了。
+  // 只在新键不存在时搬（用户已在新键上做过选择，就以新键为准），搬完删掉旧键。
+  // 必须跑在下面几个 load* 之前，否则读到的还是「新键不存在」。
+  try {
+    for (const [oldKey, newKey] of [
+      ['lightmdkit.mode', 'markdownlite.mode'],
+      ['lightmdkit.sidebarView', 'markdownlite.sidebarView'],
+      ['lightmdkit.autosave', 'markdownlite.autosave'],
+    ]) {
+      const legacy = localStorage.getItem(oldKey);
+      if (legacy === null) continue;
+      if (localStorage.getItem(newKey) === null) localStorage.setItem(newKey, legacy);
+      localStorage.removeItem(oldKey);
+    }
+  } catch (e) {
+    // 隐私模式/禁用存储时 localStorage 会抛异常，当作没有旧键处理
+  }
+
   // 界面模式：traditional = 传统模式（编辑/浏览 分离），modern = 现代模式（Typora 式常驻即时渲染）
   const MODE_STORAGE_KEY = 'markdownlite.mode';
   let currentMode = loadModePreference();
