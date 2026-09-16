@@ -130,7 +130,8 @@ const switchVisual = () => page.evaluate(() => {
 const openFile = async () => {
   await page.click('#btn-load-folder');
   await page.waitForTimeout(1200);
-  if ((await page.textContent('#btn-mode')).trim() === '现代模式') {
+  // #btn-mode 是滑动开关，标签写的是**当前**模式名（不是点它切到哪）
+  if ((await page.textContent('#btn-mode')).trim() === '传统模式') {
     await page.click('#btn-mode');            // 切到现代模式（常驻编辑态）
     await page.waitForTimeout(1000);
   }

@@ -115,7 +115,9 @@ await page.goto(BASE, { waitUntil: 'load' });
   await page.goto(`${BASE}/?drop=${encodeURIComponent(dropId)}`, { waitUntil: 'load' });
   await page.waitForTimeout(1000);
 }
-if ((await page.textContent('#btn-mode')).trim() === '现代模式') {
+// #btn-mode 现在是个滑动开关，标签写的是**当前**模式名（不是点它切到哪），
+// 所以「标签 = 传统模式」就代表现在不在现代模式，点一下切过去。
+if ((await page.textContent('#btn-mode')).trim() === '传统模式') {
   await page.click('#btn-mode');
   await page.waitForTimeout(1000);
 }

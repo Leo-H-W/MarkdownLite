@@ -135,7 +135,8 @@ async function loadDoc(text) {
   await page.evaluate((t) => { window.__setDoc(t); }, text);
   await page.click('#btn-load-folder');
   await page.waitForTimeout(900);
-  if ((await page.textContent('#btn-mode')).trim() === '现代模式') {
+  // #btn-mode 是滑动开关，标签写的是**当前**模式名；标签是「传统模式」即不在现代模式
+  if ((await page.textContent('#btn-mode')).trim() === '传统模式') {
     await page.click('#btn-mode');
     await page.waitForTimeout(700);
   }

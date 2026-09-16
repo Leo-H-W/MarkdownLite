@@ -2304,10 +2304,18 @@
     btnEdit.title = isEditMode ? '切换回浏览模式并保存' : '编辑当前文件';
 
     if (btnMode) {
-      btnMode.textContent = isModern ? '传统模式' : '现代模式';
+      // 做成滑动开关，并让标签报出**当前**模式名（而不是「点它切到哪」）。
+      // 旧写法是按钮上写「现代模式」，那是在传统模式下提示"点这里切过去" ——
+      // 很容易被读成状态说明，于是"以为自己在现代模式、其实是传统模式"，
+      // 接着就会把「浏览态点正文没有光标」当成编辑器坏了。滑块位置 + 当前模式名
+      // 两者都直接表示状态，不会再有这个歧义。
+      btnMode.classList.toggle('active', isModern);
+      btnMode.setAttribute('aria-checked', isModern ? 'true' : 'false');
+      const modeLabel = btnMode.querySelector('.switch-label');
+      if (modeLabel) modeLabel.textContent = isModern ? '现代模式' : '传统模式';
       btnMode.title = isModern
-        ? '切换到传统模式（编辑 / 浏览 分离）'
-        : '切换到现代模式（Typora 式即时渲染）';
+        ? '界面模式：现代模式（Typora 式即时渲染，点击切回传统模式）'
+        : '界面模式：传统模式（编辑 / 浏览 分离，点击切到现代模式）';
     }
   }
 

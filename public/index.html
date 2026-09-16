@@ -35,7 +35,10 @@
           <span class="switch-label">自动保存(5s)</span>
         </button>
         <button id="btn-edit" class="btn" title="编辑当前文件">编辑</button>
-        <button id="btn-mode" class="btn" title="切换到现代模式（Typora 式即时渲染）">现代模式</button>
+        <button id="btn-mode" class="switch" role="switch" aria-checked="false" title="界面模式：传统模式（编辑 / 浏览 分离，点击切到现代模式）">
+          <span class="switch-track"><span class="switch-knob"></span></span>
+          <span class="switch-label">传统模式</span>
+        </button>
         <span id="status" class="status"></span>
       </div>
     </header>
@@ -114,6 +117,6 @@
   <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/marked@12/marked.min.js"></script>
   <script src="md-render.js?v=5"></script>
-  <script src="app.js?v=49"></script>
+  <script src="app.js?v=50"></script>
 </body>
 </html>
