@@ -91,7 +91,10 @@ MarkdownLite/
 │   ├── set-windows-gui.js     # 打包后改写 exe 的 PE 子系统为 GUI
 │   ├── checklist-check.mjs    # 按 checklist.md 校验表格各项（需本机有 playwright）
 │   ├── autosave-check.mjs     # 校验自动保存开关与时机（同上）
-│   └── table-menu-check.mjs   # 校验表头「…」→ 删除表格，及表格块边界判定（同上）
+│   ├── table-menu-check.mjs   # 校验表头「…」→ 删除表格，及表格块边界判定（同上）
+│   ├── edit-modern-check.mjs    # 校验「文件列表点文件 → 点正文即可编辑」主链路，及默认现代模式 / 传统浏览态两个契约（同上）
+│   ├── repro-table-modern.mjs   # 复现脚本：传统 / 现代两种模式下表格渲染对比（传统正常、现代曾显示不对）
+│   └── repro-switch-folder.mjs  # 复现脚本：现代模式下更换文件夹后仍可编辑（6 个场景）
 ├── start.bat / stop.bat     # Windows 启动 / 停止脚本
 ├── start.sh  / stop.sh      # Linux / macOS 启动 / 停止脚本
 ├── doc/               # 知识库文档
