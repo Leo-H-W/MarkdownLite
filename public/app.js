@@ -2010,6 +2010,26 @@
     newFileHint.className = 'modal-hint' + (isError ? ' error' : '');
   }
 
+  // 新建文件的目标目录 = 当前打开的文件所在目录（currentFile 是相对路径，
+  // 如「sub/a.md」；根目录文件的目录部分为空串）。没打开任何文件时放根目录。
+  function newFileTargetDir() {
+    if (!currentFile) return '';
+    const idx = currentFile.lastIndexOf('/');
+    return idx === -1 ? '' : currentFile.slice(0, idx);
+  }
+
+  // 按相对路径逐级解析出目录句柄（写法与 renderFile 重新定位文件句柄一致）。
+  // 目录不存在（比如加载后外部把子目录删了/改名了）会抛异常，由调用方处理。
+  async function resolveDirHandle(dirPath) {
+    let dir = currentFolderHandle;
+    if (dirPath) {
+      for (const seg of dirPath.split('/').filter(Boolean)) {
+        dir = await dir.getDirectoryHandle(seg);
+      }
+    }
+    return dir;
+  }
+
   function openNewFileDialog() {
     if (!currentFolderHandle) {
       setStatus('请先加载文件夹', 'error');
@@ -2017,7 +2037,11 @@
     }
     newFileName.value = '';
     // 目录句柄只给得到文件夹名，拿不到完整磁盘路径（浏览器安全限制，见顶栏提示）
-    setNewFileHint('保存位置：' + currentFolderHandle.name + '（当前文件夹）\n'
+    const targetDir = newFileTargetDir();
+    const where = targetDir
+      ? currentFolderHandle.name + '/' + targetDir + '（与当前文件同目录）'
+      : currentFolderHandle.name + '（根目录）';
+    setNewFileHint('保存位置：' + where + '\n'
       + '只支持 .md / .markdown；不写扩展名时自动补 .md', false);
     newFileModal.classList.remove('hidden');
     newFileName.focus();
@@ -2027,8 +2051,9 @@
     newFileModal.classList.add('hidden');
   }
 
-  // 校验文件名；返回 { ok, name } 或 { ok: false, msg }
-  function validateNewFileName(raw) {
+  // 校验文件名；targetDir 是新建的目标目录（'' = 根目录），重名检查只看这个目录。
+  // 返回 { ok, name } 或 { ok: false, msg }
+  function validateNewFileName(raw, targetDir) {
     const name = String(raw || '').trim();
     if (!name) return { ok: false, msg: '请输入文件名' };
     if (/[\\/]/.test(name)) return { ok: false, msg: '文件名不能包含路径分隔符（\\ 或 /）' };
@@ -2047,9 +2072,10 @@
     }
 
     // 重名必须在这里挡掉：getFileHandle 的 create:true 在文件已存在时会直接返回它，
-    // 后面的写入会把原有内容覆盖掉
-    if (currentFiles.some(f => f.path === finalName)) {
-      return { ok: false, msg: '当前目录下已存在「' + finalName + '」，请换个名字' };
+    // 后面的写入会把原有内容覆盖掉。只和目标目录里的文件比（子目录里重名不算冲突）
+    const targetPath = targetDir ? targetDir + '/' + finalName : finalName;
+    if (currentFiles.some(f => f.path === targetPath)) {
+      return { ok: false, msg: '目标目录下已存在「' + finalName + '」，请换个名字' };
     }
     return { ok: true, name: finalName };
   }
@@ -2091,25 +2117,38 @@
       setNewFileHint('请先加载文件夹', true);
       return;
     }
-    const check = validateNewFileName(newFileName.value);
+    const targetDir = newFileTargetDir();
+    const check = validateNewFileName(newFileName.value, targetDir);
     if (!check.ok) {
       setNewFileHint(check.msg, true);
       newFileName.focus();
       return;
     }
     const fileName = check.name;
+    const targetPath = targetDir ? targetDir + '/' + fileName : fileName;
+
+    // 目标目录句柄：正常都能解析出来；解析失败（子目录被外部删改）就别写了，
+    // 静默落到根目录会让用户找不到刚建的文件，比报错更糟
+    let dirHandle;
+    try {
+      dirHandle = await resolveDirHandle(targetDir);
+    } catch (e) {
+      console.error(e);
+      setNewFileHint('无法定位当前文件所在目录（可能被移动或删除），请「刷新」后重试', true);
+      return;
+    }
 
     btnNewFileCreate.disabled = true;
     setNewFileHint('创建中...', false);
     try {
-      const handle = await currentFolderHandle.getFileHandle(fileName, { create: true });
+      const handle = await dirHandle.getFileHandle(fileName, { create: true });
       const writable = await handle.createWritable();
       await writable.write(newFileTemplate(fileName));
       await writable.close();
 
       closeNewFileDialog();
-      setStatus('已创建 ' + fileName, 'success');
-      await rescanAndOpen(fileName);
+      setStatus('已创建 ' + targetPath, 'success');
+      await rescanAndOpen(targetPath);
     } catch (e) {
       console.error(e);
       setNewFileHint(describeWriteError(e, fileName), true);

@@ -155,10 +155,62 @@ async function typeProbe(page) {
   return changed;
 }
 
-async function newPage(browser, seed) {
+// 场景 C 用的可写假文件系统：目录 / 文件用 Map 维护，支持创建文件并真实保存内容，
+// 这样「新文件」创建后应用重新扫描（entries）能扫到它、打开能读到模板内容。
+function initScriptWritable({ dir, seed }) {
+  const mkFile = (name, content) => {
+    const f = {
+      kind: 'file', name, __c: content,
+      async getFile() { return new File([f.__c], name, { type: 'text/markdown' }); },
+      async createWritable() {
+        let buf = f.__c;
+        return {
+          async write(c) { buf = String(c); },
+          async close() { f.__c = buf; },
+        };
+      },
+    };
+    return f;
+  };
+  const notFound = (what) => { const e = new Error('不存在：' + what); e.name = 'NotFoundError'; return e; };
+  const mkDir = (spec) => {
+    const files = new Map(), dirs = new Map();
+    const d = {
+      kind: 'directory', name: spec.name,
+      async *entries() {
+        for (const [n, f] of files) yield [n, f];
+        for (const [n, s] of dirs) yield [n, s];
+      },
+      async getDirectoryHandle(name) {
+        const s = dirs.get(name);
+        if (!s) throw notFound(name);
+        return s;
+      },
+      async getFileHandle(name, opts) {
+        let f = files.get(name);
+        if (!f && opts && opts.create) { f = mkFile(name, ''); files.set(name, f); }
+        if (!f) throw notFound(name);
+        return f;
+      },
+      async queryPermission() { return 'granted'; },
+      async requestPermission() { return 'granted'; },
+    };
+    for (const [n, c] of spec.files) files.set(n, mkFile(n, c));
+    for (const sub of spec.subs) dirs.set(sub.name, mkDir(sub));
+    return d;
+  };
+  const root = mkDir(dir);
+  window.showDirectoryPicker = async () => root;
+  try {
+    localStorage.clear();
+    for (const [k, v] of Object.entries(seed)) localStorage.setItem(k, v);
+  } catch (e) {}
+}
+
+async function newPage(browser, seed, initFn = initScript) {
   const page = await (await browser.newContext({ viewport: { width: 1280, height: 800 } })).newPage();
   page.on('pageerror', (e) => errors.push(e.message));
-  await page.addInitScript(initScript, { dir: DIR, seed });
+  await page.addInitScript(initFn, { dir: DIR, seed });
   await page.goto(BASE);
   await page.waitForTimeout(500);
   return page;
@@ -256,6 +308,65 @@ const browser = await launchChromium();
   check('B4', '点开关切现代后：聚焦 + 光标 + 可输入',
     s.focused && s.curVisible && (await typeProbe(page)),
     JSON.stringify({ focused: s.focused, cur: s.curVisible }));
+
+  await page.context().close();
+}
+
+// ---------- 场景 C：新文件建在当前打开文件所在目录 ----------
+
+{
+  const page = await newPage(browser, {}, initScriptWritable);
+  const status = () => page.evaluate(() => document.getElementById('status').textContent);
+  const hint = () => page.evaluate(() => document.getElementById('new-file-hint').textContent);
+  const value = () => page.evaluate(() => document.querySelector('.CodeMirror').CodeMirror.getValue());
+
+  await page.click('#btn-load-folder');
+  await page.waitForTimeout(1100);
+
+  // 打开子目录里的文件 → 新文件应落在 sub/
+  await page.evaluate(() => document.querySelectorAll('.file-item')[2].click());   // nested.md
+  await page.waitForTimeout(900);
+  await page.click('#btn-new-file');
+  await page.waitForTimeout(300);
+  check('C1', '打开子目录文件后点「新文件」，弹窗提示保存位置含子目录',
+    (await hint()).includes('校验目录/sub'), await hint());
+
+  await page.fill('#new-file-name', 'note');
+  await page.click('#btn-new-file-create');
+  await page.waitForTimeout(1400);
+  const st = await status();
+  check('C2', '创建后状态栏写明 sub/note.md', st.includes('已创建 sub/note.md'), st);
+  check('C3', '创建后自动打开，内容是同名标题模板',
+    (await value()) === '# note\n\n', JSON.stringify(await value()));
+  const itemCount = await page.evaluate(() => document.querySelectorAll('.file-item').length);
+  check('C4', '文件列表重新扫描后多出一个文件', itemCount === 4, `${itemCount} 项`);
+
+  // 同目录重名要挡掉（不覆盖已有文件）
+  await page.click('#btn-new-file');
+  await page.waitForTimeout(300);
+  await page.fill('#new-file-name', 'note');
+  await page.click('#btn-new-file-create');
+  await page.waitForTimeout(400);
+  const dupHint = await hint();
+  check('C5', '同目录重名被拦截且不覆盖', dupHint.includes('已存在'), dupHint);
+  check('C6', '拦截后弹窗仍开着、原文未被破坏',
+    await page.evaluate(() => !document.getElementById('new-file-modal').classList.contains('hidden')) &&
+    (await value()) === '# note\n\n');
+  await page.click('#btn-new-file-cancel');
+
+  // 打开根目录文件 → 新文件应落在根目录（不是上一次的子目录）
+  await page.evaluate(() => document.querySelectorAll('.file-item')[0].click());   // plain.md
+  await page.waitForTimeout(900);
+  await page.click('#btn-new-file');
+  await page.waitForTimeout(300);
+  check('C7', '打开根目录文件后，弹窗提示保存位置是根目录',
+    (await hint()).includes('根目录') && !(await hint()).includes('/sub'), await hint());
+  await page.fill('#new-file-name', 'rootnote');
+  await page.click('#btn-new-file-create');
+  await page.waitForTimeout(1400);
+  const st2 = await status();
+  check('C8', '创建后状态栏写明 rootnote.md（无子目录前缀）',
+    st2.includes('已创建 rootnote.md') && !st2.includes('sub/'), st2);
 
   await page.context().close();
 }
