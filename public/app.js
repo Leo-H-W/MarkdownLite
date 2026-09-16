@@ -1705,6 +1705,7 @@
       if (dir !== lastDir) {
         const group = document.createElement('div');
         group.className = 'file-dir';
+        group.dataset.dir = dir;              // 拖放移动文件的目标目录（见 moveFileToDir）
         group.textContent = dir || '根目录';
         if (dir) group.title = dir;
         fragment.appendChild(group);
@@ -1716,6 +1717,7 @@
       item.className = 'file-item' + (path === currentFile ? ' active' : '');
       item.dataset.path = path;
       item.title = path;
+      item.draggable = true;                // 可拖到目录分组标题上移动文件
 
       const icon = document.createElement('span');
       icon.className = 'file-icon';
@@ -1732,6 +1734,121 @@
 
     fileListEl.appendChild(fragment);
   }
+
+  // ---------------- 文件列表内拖动文件到其它目录 ----------------
+  // 把文件项（.file-item）拖到某个目录分组标题（.file-dir，含「根目录」）上即移动。
+  // 没有多选，拖哪个动哪个。移动走 FileSystemHandle.move()（Chrome 124+）；
+  // 更老的内核退化为「复制 + remove()」，两者都没有就明确报错让用户升级。
+  let dragSourcePath = null;
+
+  function dirOfPath(path) {
+    const slash = path.lastIndexOf('/');
+    return slash === -1 ? '' : path.slice(0, slash);
+  }
+
+  async function moveFileToDir(sourcePath, targetDir) {
+    const sourceDir = dirOfPath(sourcePath);
+    if (sourceDir === targetDir) return;          // 同目录，等于没动
+    const baseName = sourceDir ? sourcePath.slice(sourceDir.length + 1) : sourcePath;
+    const targetPath = targetDir ? targetDir + '/' + baseName : baseName;
+
+    // UI 层先挡重名：move 撞到同名会抛异常，但提前拦住能给更清楚的提示
+    if (currentFiles.some(f => (f.path || f.name) === targetPath)) {
+      setStatus('目标目录已存在「' + baseName + '」，未移动', 'error');
+      return;
+    }
+
+    // 重新按路径解析句柄：列表里缓存的句柄可能已陈旧，移动必须用最新句柄
+    let sourceHandle, targetHandle;
+    try {
+      const segs = sourcePath.split('/').filter(Boolean);
+      let dir = currentFolderHandle;
+      for (let i = 0; i < segs.length - 1; i++) dir = await dir.getDirectoryHandle(segs[i]);
+      sourceHandle = await dir.getFileHandle(segs[segs.length - 1]);
+      targetHandle = await resolveDirHandle(targetDir);
+    } catch (e) {
+      console.error(e);
+      setStatus('移动失败：找不到文件或目录（可能已被移动/删除），请「刷新」后重试', 'error');
+      return;
+    }
+
+    try {
+      if (typeof sourceHandle.move === 'function') {
+        await sourceHandle.move(targetHandle, baseName);
+      } else if (typeof sourceHandle.remove === 'function') {
+        // 老内核没有 move：复制到目标、关闭、再从源位置删除
+        const targetFile = await targetHandle.getFileHandle(baseName, { create: true });
+        const writable = await targetFile.createWritable();
+        await writable.write(await (await sourceHandle.getFile()).text());
+        await writable.close();
+        await sourceHandle.remove();
+      } else {
+        setStatus('当前浏览器不支持移动文件（需要 Chrome 124+），请升级后重试', 'error');
+        return;
+      }
+    } catch (e) {
+      console.error(e);
+      const errName = e && e.name;
+      if (errName === 'NotAllowedError' || errName === 'SecurityError') {
+        setStatus('没有写入权限：这个目录是以只读方式打开的，请用「加载文件夹」重新选择目录', 'error');
+      } else if (errName === 'InvalidModificationError' || errName === 'NoModificationAllowedError') {
+        setStatus('目标目录已存在「' + baseName + '」，未移动', 'error');
+      } else {
+        setStatus('移动失败：' + ((e && e.message) || '未知错误'), 'error');
+      }
+      return;
+    }
+
+    // 移动的是当前打开的文件：currentFile 换成新路径（内容没变，不用重载）
+    if (currentFile === sourcePath) currentFile = targetPath;
+
+    // 重新扫描刷新列表（文件的分组归属变了）
+    try {
+      currentFiles = await collectMarkdownFiles(currentFolderHandle);
+      await renderFileList();
+      updateActiveFileItem();
+    } catch (e) {
+      console.error(e);
+    }
+    setStatus('已将 ' + baseName + ' 移动到 ' + (targetDir || '根目录'), 'success');
+  }
+
+  // 事件委托，dragstart/dragend/dragover/dragleave/drop 都挂在列表容器上
+  fileListEl.addEventListener('dragstart', (e) => {
+    const item = e.target.closest('.file-item');
+    if (!item) return;
+    dragSourcePath = item.dataset.path;
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('text/plain', dragSourcePath);   // drop 时从这儿读
+    item.classList.add('dragging');
+  });
+  fileListEl.addEventListener('dragend', () => {
+    dragSourcePath = null;
+    fileListEl.querySelectorAll('.dragging, .drop-target')
+      .forEach((el) => el.classList.remove('dragging', 'drop-target'));
+  });
+  fileListEl.addEventListener('dragover', (e) => {
+    const header = e.target.closest('.file-dir');
+    // dragover 阶段读不到 dataTransfer 的内容，来源路径用模块变量记着
+    if (!header || !dragSourcePath) return;
+    if (header.dataset.dir === dirOfPath(dragSourcePath)) return;   // 同目录不是目标
+    e.preventDefault();                       // 不阻止默认就不会触发 drop
+    e.dataTransfer.dropEffect = 'move';
+    header.classList.add('drop-target');
+  });
+  fileListEl.addEventListener('dragleave', (e) => {
+    const header = e.target.closest('.file-dir');
+    if (header) header.classList.remove('drop-target');
+  });
+  fileListEl.addEventListener('drop', (e) => {
+    const header = e.target.closest('.file-dir');
+    if (!header) return;
+    e.preventDefault();
+    const source = e.dataTransfer.getData('text/plain') || dragSourcePath;
+    const targetDir = header.dataset.dir || '';
+    fileListEl.querySelectorAll('.drop-target').forEach((el) => el.classList.remove('drop-target'));
+    if (source) moveFileToDir(source, targetDir);
+  });
 
   function showEmptyState(msg) {
     contentEl.innerHTML = '<div class="empty-state"><p>' + escapeHtml(msg) + '</p></div>';
@@ -2010,12 +2127,9 @@
     newFileHint.className = 'modal-hint' + (isError ? ' error' : '');
   }
 
-  // 新建文件的目标目录 = 当前打开的文件所在目录（currentFile 是相对路径，
-  // 如「sub/a.md」；根目录文件的目录部分为空串）。没打开任何文件时放根目录。
+  // 新建文件的目标目录 = 当前打开的文件所在目录；没打开任何文件时放根目录
   function newFileTargetDir() {
-    if (!currentFile) return '';
-    const idx = currentFile.lastIndexOf('/');
-    return idx === -1 ? '' : currentFile.slice(0, idx);
+    return currentFile ? dirOfPath(currentFile) : '';
   }
 
   // 按相对路径逐级解析出目录句柄（写法与 renderFile 重新定位文件句柄一致）。

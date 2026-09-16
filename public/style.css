@@ -429,6 +429,18 @@ html, body {
   font-weight: 500;
 }
 
+/* 文件列表内拖动文件到其它目录（.file-dir 是投放目标，逻辑见 app.js moveFileToDir） */
+.file-item.dragging {
+  opacity: .4;
+}
+.file-dir.drop-target {
+  background: #ddf4ff;
+  color: #0969da;
+  outline: 1px dashed #0969da;
+  outline-offset: -2px;
+  border-radius: 4px;
+}
+
 .file-icon {
   flex-shrink: 0;
   font-size: 12px;

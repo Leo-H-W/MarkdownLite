@@ -160,7 +160,7 @@ async function typeProbe(page) {
 function initScriptWritable({ dir, seed }) {
   const mkFile = (name, content) => {
     const f = {
-      kind: 'file', name, __c: content,
+      kind: 'file', name, __c: content, __parent: null,
       async getFile() { return new File([f.__c], name, { type: 'text/markdown' }); },
       async createWritable() {
         let buf = f.__c;
@@ -169,6 +169,17 @@ function initScriptWritable({ dir, seed }) {
           async close() { f.__c = buf; },
         };
       },
+      // FileSystemHandle.move()（Chrome 124+）：同名校验 + 换父目录，与应用代码对应
+      async move(dest, newName) {
+        const n = newName || f.name;
+        if (dest.__files.has(n)) {
+          const e = new Error('exists'); e.name = 'InvalidModificationError'; throw e;
+        }
+        if (f.__parent) f.__parent.__files.delete(f.name);
+        f.name = n;
+        dest.__files.set(n, f);
+        f.__parent = dest;
+      },
     };
     return f;
   };
@@ -176,7 +187,7 @@ function initScriptWritable({ dir, seed }) {
   const mkDir = (spec) => {
     const files = new Map(), dirs = new Map();
     const d = {
-      kind: 'directory', name: spec.name,
+      kind: 'directory', name: spec.name, __files: files, __dirs: dirs,
       async *entries() {
         for (const [n, f] of files) yield [n, f];
         for (const [n, s] of dirs) yield [n, s];
@@ -188,14 +199,14 @@ function initScriptWritable({ dir, seed }) {
       },
       async getFileHandle(name, opts) {
         let f = files.get(name);
-        if (!f && opts && opts.create) { f = mkFile(name, ''); files.set(name, f); }
+        if (!f && opts && opts.create) { f = mkFile(name, ''); f.__parent = d; files.set(name, f); }
         if (!f) throw notFound(name);
         return f;
       },
       async queryPermission() { return 'granted'; },
       async requestPermission() { return 'granted'; },
     };
-    for (const [n, c] of spec.files) files.set(n, mkFile(n, c));
+    for (const [n, c] of spec.files) { const f = mkFile(n, c); f.__parent = d; files.set(n, f); }
     for (const sub of spec.subs) dirs.set(sub.name, mkDir(sub));
     return d;
   };
@@ -367,6 +378,68 @@ const browser = await launchChromium();
   const st2 = await status();
   check('C8', '创建后状态栏写明 rootnote.md（无子目录前缀）',
     st2.includes('已创建 rootnote.md') && !st2.includes('sub/'), st2);
+
+  await page.context().close();
+}
+
+// ---------- 场景 D：文件列表内拖动文件到其它目录 ----------
+
+{
+  const page = await newPage(browser, {}, initScriptWritable);
+  const status = () => page.evaluate(() => document.getElementById('status').textContent);
+  const paths = () => page.evaluate(() =>
+    [...document.querySelectorAll('.file-item')].map((e) => e.dataset.path).sort());
+  const value = () => page.evaluate(() => document.querySelector('.CodeMirror').CodeMirror.getValue());
+  const drag = (src, dst) =>
+    page.dragAndDrop(`.file-item[data-path="${src}"]`, `.file-dir[data-dir="${dst}"]`);
+
+  await page.click('#btn-load-folder');
+  await page.waitForTimeout(1100);
+
+  // 根目录文件 → 子目录
+  await drag('plain.md', 'sub');
+  await page.waitForTimeout(1300);
+  check('D1', '拖动根目录文件到子目录：状态栏写明移动',
+    (await status()).includes('已将 plain.md 移动到 sub'), await status());
+  check('D2', '移动后列表归属更新（sub/plain.md 出现，根目录 plain.md 消失）',
+    JSON.stringify(await paths()) === JSON.stringify(['sub/nested.md', 'sub/plain.md', 'table.md']),
+    (await paths()).join(' | '));
+
+  // 移动当前打开的文件到根目录：currentFile 跟随、内容不变、仍可编辑
+  await page.evaluate(() => document.querySelector('.file-item[data-path="sub/nested.md"]').click());
+  await page.waitForTimeout(900);
+  await drag('sub/nested.md', '');
+  await page.waitForTimeout(1300);
+  const st3 = await status();
+  const afterActive = await page.evaluate(() =>
+    (document.querySelector('.file-item.active') || {}).dataset || {});
+  check('D3', '移动当前打开的文件：状态栏写明移动到根目录',
+    st3.includes('已将 nested.md 移动到 根目录'), st3);
+  check('D4', 'currentFile 跟随新路径且高亮正确', afterActive.path === 'nested.md',
+    JSON.stringify(afterActive));
+  await page.mouse.click(600, 200);                 // 拖完焦点在列表上，先点回正文
+  await page.waitForTimeout(300);
+  check('D5', '移动后内容完好且仍可输入',
+    (await value()) === NESTED_DOC && (await typeProbe(page)));
+
+  // 目标目录已有同名文件：拦截、不移动、列表不变。
+  // 先打开 sub/plain.md，用「新文件」在 sub 里建一个 table.md，再把根目录的 table.md 拖过去
+  await page.evaluate(() => document.querySelector('.file-item[data-path="sub/plain.md"]').click());
+  await page.waitForTimeout(900);
+  await page.click('#btn-new-file');
+  await page.waitForTimeout(300);
+  await page.fill('#new-file-name', 'table');
+  await page.click('#btn-new-file-create');
+  await page.waitForTimeout(1400);
+  const beforePaths = await paths();
+  await drag('table.md', 'sub');
+  await page.waitForTimeout(1300);
+  const st4 = await status();
+  check('D6', '目标目录已有同名文件：拦截并提示',
+    st4.includes('已存在'), st4);
+  check('D7', '拦截后文件原地不动（列表不变）',
+    JSON.stringify(await paths()) === JSON.stringify(beforePaths),
+    `${beforePaths.join(' | ')} -> ${(await paths()).join(' | ')}`);
 
   await page.context().close();
 }
