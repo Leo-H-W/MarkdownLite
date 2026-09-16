@@ -1,6 +1,6 @@
 # 测试文档
 
-这是一个用于测试 LightMDKit 的示例 Markdown 文件。
+这是一个用于测试 MarkdownLite 的示例 Markdown 文件。
 
 ## 功能特性
 
@@ -12,7 +12,7 @@
 
 ```javascript
 function hello() {
-  console.log("Hello, LightMDKit!");
+  console.log("Hello, MarkdownLite!");
 }
 ```
 
@@ -20,7 +20,7 @@ function hello() {
 
 | 名称 | 描述 |
 |------|------|
-| LightMDKit | 本地 Markdown 查看器 |
+| MarkdownLite | 本地 Markdown 查看器 |
 | Express | Web 框架 |
 
 ## 二级标题 A

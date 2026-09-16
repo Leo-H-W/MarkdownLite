@@ -46,7 +46,7 @@
   // 是否处于编辑模式
   let isEditMode = false;
   // 界面模式：traditional = 传统模式（编辑/浏览 分离），modern = 现代模式（Typora 式常驻即时渲染）
-  const MODE_STORAGE_KEY = 'lightmdkit.mode';
+  const MODE_STORAGE_KEY = 'markdownlite.mode';
   let currentMode = loadModePreference();
 
   function loadModePreference() {
@@ -67,7 +67,7 @@
   }
 
   // 侧边栏视图：files = 文件列表（当前目录下可打开的文件），toc = 当前文档的标题目录
-  const SIDEBAR_VIEW_KEY = 'lightmdkit.sidebarView';
+  const SIDEBAR_VIEW_KEY = 'markdownlite.sidebarView';
   let sidebarView = loadSidebarView();
 
   function loadSidebarView() {
@@ -102,7 +102,7 @@
   let lastSavedText = null;
   const AUTOSAVE_IDLE_MS = 5000;
   // 自动保存开关：**默认关闭**，只有顶栏那个按钮打开后才写盘。偏好记在浏览器本地
-  const AUTOSAVE_STORAGE_KEY = 'lightmdkit.autosave';
+  const AUTOSAVE_STORAGE_KEY = 'markdownlite.autosave';
   let autosaveOn = loadAutosavePreference();
 
   function loadAutosavePreference() {
@@ -1776,7 +1776,7 @@
         img.src = url;
       } catch (e) {
         // 文件不存在或读取失败时保留原 src，便于排查
-        console.warn('[LightMDKit] 图片加载失败:', rel, e);
+        console.warn('[MarkdownLite] 图片加载失败:', rel, e);
       }
     }
   }
@@ -2089,7 +2089,7 @@
     try {
       hrefPath = normalizePathForMatch(decodeURIComponent(href.split(/[?#]/)[0]));
     } catch (err) {
-      console.warn('[LightMDKit] 链接编码无法解析，按普通链接处理:', href);
+      console.warn('[MarkdownLite] 链接编码无法解析，按普通链接处理:', href);
       return;
     }
     if (!hrefPath) return;
@@ -2464,7 +2464,7 @@
   // 注意：浏览器安全限制下，拖入的“文件”拿不到其父目录句柄，因此只有当文件
   // 位于当前已加载的目录（isSameEntry 比对）或直接拖入文件夹时，新标签页才能
   // 把文件列表定位到所在目录；否则只能打开单个文件。
-  const DROP_DB_NAME = 'lightmdkit';
+  const DROP_DB_NAME = 'markdownlite';
   const DROP_STORE = 'drops';
   const DROP_TTL_MS = 24 * 60 * 60 * 1000;
 
@@ -2655,7 +2655,7 @@
         // 拿到了目录句柄（拖入文件夹，或文件位于当前已加载目录）：
         // 文件列表定位到该目录，并选中对应文件（优先用相对路径，能定位到子目录）
         await loadFolderHandle(record.folderHandle, record.filePath || record.fileName);
-        document.title = record.folderHandle.name + ' - LightMDKit';
+        document.title = record.folderHandle.name + ' - MarkdownLite';
         if (record.fileName) {
           setStatus('已在新标签页打开 ' + record.fileName, 'success');
         } else {
@@ -2674,7 +2674,7 @@
         await renderFileList();
         folderLabel.textContent = record.fileName;
         folderLabel.title = '浏览器安全限制，无法自动定位到文件所在目录';
-        document.title = record.fileName + ' - LightMDKit';
+        document.title = record.fileName + ' - MarkdownLite';
         updateLoadFolderButton();
         await renderFile(currentFiles[0]);
         setStatus('已打开拖入的文件（浏览器限制未定位所在目录，可手动“加载文件夹”）');

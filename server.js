@@ -17,7 +17,7 @@ const isWindows = os.platform() === 'win32';
 
 // POST /api/select-folder - open system folder dialog
 app.post('/api/select-folder', (req, res) => {
-  console.log('[LightMDKit] /api/select-folder requested');
+  console.log('[MarkdownLite] /api/select-folder requested');
   if (!isWindows) {
     return res.status(500).json({ error: 'Folder dialog is only supported on Windows' });
   }
@@ -224,7 +224,7 @@ app.post('/api/refresh', (req, res) => {
 });
 
 const url = `http://localhost:${PORT}`;
-const DAEMON_ENV = 'LIGHTMDKIT_DAEMON';
+const DAEMON_ENV = 'MARKDOWNLITE_DAEMON';
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -298,13 +298,13 @@ async function main() {
 
   if (!portBusy) {
     spawnDaemon();
-    console.log(`LightMDKit started at ${url}`);
+    console.log(`MarkdownLite started at ${url}`);
     await sleep(2000);
     openBrowser(url);
     process.exit(0);
   }
 
-  console.log(`\n端口 ${PORT} 已被占用，LightMDKit 可能已在运行。`);
+  console.log(`\n端口 ${PORT} 已被占用，MarkdownLite 可能已在运行。`);
   console.log(`打开访问地址: ${url}`);
   openBrowser(url);
   process.exit(0);

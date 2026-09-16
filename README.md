@@ -1,4 +1,4 @@
-# LightMDKit
+# MarkdownLite
 
 免安装的本地 Markdown 工作台，以 GitHub 风格渲染与编辑 Markdown 文件。无需上传文件，直接通过浏览器读取本地文件夹，支持目录导航、在线编辑、双编辑模式与 Mermaid 图表。
 
@@ -78,7 +78,7 @@ npm start
 ## 项目结构
 
 ```
-LightMDKit/
+MarkdownLite/
 ├── server.js          # Express 静态服务 + 守护进程 + REST API
 ├── package.json
 ├── public/

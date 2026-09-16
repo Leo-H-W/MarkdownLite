@@ -1,12 +1,12 @@
 {
-  "name": "lightmdkit",
+  "name": "markdownlite",
   "version": "1.0.0",
   "description": "Lightweight no-install local Markdown editor and viewer with GitHub-style rendering",
   "main": "server.js",
   "bin": "server.js",
   "scripts": {
     "start": "node server.js",
-    "build:win": "pkg . --output dist/lightmdkit.exe && node scripts/set-windows-gui.js"
+    "build:win": "pkg . --output dist/markdownlite.exe && node scripts/set-windows-gui.js"
   },
   "pkg": {
     "targets": [

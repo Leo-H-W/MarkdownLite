@@ -1,7 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 
-const exePath = process.argv[2] || path.join(__dirname, '..', 'dist', 'lightmdkit.exe');
+const exePath = process.argv[2] || path.join(__dirname, '..', 'dist', 'markdownlite.exe');
 
 if (!fs.existsSync(exePath)) {
   console.error(`EXE not found: ${exePath}`);

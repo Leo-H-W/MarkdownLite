@@ -94,7 +94,7 @@ await page.goto(BASE, { waitUntil: 'load' });
   const dropId = 'checklist-' + Date.now();
   await page.evaluate(async ({ id, content }) => {
     const db = await new Promise((res, rej) => {
-      const r = indexedDB.open('lightmdkit', 1);
+      const r = indexedDB.open('markdownlite', 1);
       r.onupgradeneeded = () => {
         if (!r.result.objectStoreNames.contains('drops')) r.result.createObjectStore('drops');
       };
