@@ -118,7 +118,11 @@ for (const [name, dirs, extra] of scenarios) {
   await page.goto(BASE);
   await page.click('#btn-load-folder');             // 加载第一个目录
   await page.waitForTimeout(900);
-  await page.click('#btn-mode');                    // 切现代模式
+  // 确保进现代模式。开关标签写的是**当前**模式名，默认已经是现代，别再无条件点一下
+  // —— 那反而会切回传统，后面的用例全都不在编辑态，测出来的东西是错的。
+  if ((await page.textContent('#btn-mode')).trim() === '传统模式') {
+    await page.click('#btn-mode');
+  }
   await page.waitForTimeout(800);
 
   await extra(page);                                 // 场景特有的前置动作

@@ -49,7 +49,11 @@ await page.goto(BASE);
 await page.click('#btn-load-folder');
 await page.waitForTimeout(1000);
 
-// 传统模式（默认就是浏览态）
+// 传统模式：显式确保当前是传统模式（默认已是现代，不能假设「一进来就是浏览态」）
+if ((await page.textContent('#btn-mode')).trim() === '现代模式') {
+  await page.click('#btn-mode');
+  await page.waitForTimeout(900);
+}
 await page.screenshot({ path: 'D:/temp/daily_delete/repro-traditional.png', clip: { x: 0, y: 0, width: 1500, height: 700 } });
 const tradCells = await page.evaluate(() => document.querySelectorAll('#content table td, #content table th').length);
 const tradCols = await page.evaluate(() => {
@@ -59,8 +63,10 @@ const tradCols = await page.evaluate(() => {
 const tradTables = await page.evaluate(() => document.querySelectorAll('#content table').length);
 console.log(`传统模式：<table> ${tradTables} 个，首行 ${tradCols} 格，合计 ${tradCells} 格`);
 
-// 现代模式
-await page.click('#btn-mode');
+// 现代模式：确保切过去（默认已是现代，就别点了，否则会切回传统）
+if ((await page.textContent('#btn-mode')).trim() === '传统模式') {
+  await page.click('#btn-mode');
+}
 await page.waitForTimeout(1200);
 await page.screenshot({ path: 'D:/temp/daily_delete/repro-modern.png', clip: { x: 0, y: 0, width: 1500, height: 700 } });
 

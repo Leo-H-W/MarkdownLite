@@ -73,10 +73,15 @@
 
   function loadModePreference() {
     try {
-      return localStorage.getItem(MODE_STORAGE_KEY) === 'modern' ? 'modern' : 'traditional';
+      // 默认现代模式：没存过偏好（新用户、清过站点数据）时直接进常驻编辑态。
+      // 判据必须写成「等于 'traditional'」而不是「等于 'modern'」—— 后者在键缺失时
+      // 会落回传统模式，而这正是改名换键后老用户「打开就变成传统模式、点正文没光标」
+      // 的成因，别再写回去了。
+      return localStorage.getItem(MODE_STORAGE_KEY) === 'traditional' ? 'traditional' : 'modern';
     } catch (e) {
-      // 隐私模式/禁用存储时 localStorage 会抛异常，回退传统模式
-      return 'traditional';
+      // 隐私模式/禁用存储时 localStorage 会抛异常，同样按默认的现代模式处理；
+      // CodeMirror 没就绪时启动处还有一道「退回传统模式」的兜底
+      return 'modern';
     }
   }
 
