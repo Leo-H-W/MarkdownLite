@@ -27,6 +27,11 @@
   const newFileHint = document.getElementById('new-file-hint');
   const btnNewFileCreate = document.getElementById('btn-new-file-create');
   const btnNewFileCancel = document.getElementById('btn-new-file-cancel');
+  const renameModal = document.getElementById('rename-modal');
+  const renameName = document.getElementById('rename-name');
+  const renameHint = document.getElementById('rename-hint');
+  const btnRenameOk = document.getElementById('btn-rename-ok');
+  const btnRenameCancel = document.getElementById('btn-rename-cancel');
 
   // { name: string, path: string, handle: FileSystemFileHandle }[]
   //   name = 文件名（文档内链接用 ./xxx.md 这种写法匹配时靠它）
@@ -1712,12 +1717,13 @@
         lastDir = dir;
       }
 
-      const item = document.createElement('button');
-      item.type = 'button';
+      const item = document.createElement('div');   // div 而非 button：里面要再放「⋯」按钮（按钮不能套按钮）
       item.className = 'file-item' + (path === currentFile ? ' active' : '');
       item.dataset.path = path;
       item.title = path;
       item.draggable = true;                // 可拖到目录分组标题上移动文件
+      item.tabIndex = 0;                    // div 恢复键盘可达（回车打开，见列表容器的 keydown 委托）
+      item.setAttribute('role', 'button');
 
       const icon = document.createElement('span');
       icon.className = 'file-icon';
@@ -1727,8 +1733,20 @@
       label.className = 'file-name';
       label.textContent = baseName;
 
+      const menuBtn = document.createElement('button');
+      menuBtn.type = 'button';
+      menuBtn.className = 'file-menu-btn';
+      menuBtn.textContent = '⋯';
+      menuBtn.title = '文件操作（重命名 / 删除）';
+      menuBtn.addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();                // 别冒泡成「打开文件」
+        openFileItemMenu(menuBtn, path);
+      });
+
       item.appendChild(icon);
       item.appendChild(label);
+      item.appendChild(menuBtn);
       fragment.appendChild(item);
     });
 
@@ -1744,6 +1762,162 @@
   function dirOfPath(path) {
     const slash = path.lastIndexOf('/');
     return slash === -1 ? '' : path.slice(0, slash);
+  }
+
+  function baseNameOf(path) {
+    const dir = dirOfPath(path);
+    return dir ? path.slice(dir.length + 1) : path;
+  }
+
+  // ---------------- 文件项的「⋯」菜单：重命名 / 删除 ----------------
+  // 菜单本体复用表格行菜单的 showTableMenu（定位、Esc/点外收起都是现成的）。
+  let renameTarget = null;   // 重命名弹窗当前作用的文件路径
+
+  function openFileItemMenu(btn, path) {
+    showTableMenu(btn, [
+      { label: '重命名', run() { openRenameDialog(path); } },
+      { label: '删除', run() { deleteFileItem(path); } },
+    ]);
+  }
+
+  function openRenameDialog(path) {
+    renameTarget = path;
+    renameName.value = baseNameOf(path);
+    setRenameHint('所在目录：' + (dirOfPath(path) || '根目录') + '（只改名字，不支持借此移动目录）', false);
+    renameModal.classList.remove('hidden');
+    renameName.focus();
+    renameName.select();
+  }
+
+  function closeRenameDialog() {
+    renameModal.classList.add('hidden');
+    renameTarget = null;
+  }
+
+  function setRenameHint(msg, isError) {
+    renameHint.textContent = msg;
+    renameHint.className = 'modal-hint' + (isError ? ' error' : '');
+  }
+
+  async function commitRename() {
+    if (!renameTarget) return;
+    const oldPath = renameTarget;
+    const dir = dirOfPath(oldPath);
+    const check = sanitizeFileName(renameName.value);
+    if (!check.ok) {
+      setRenameHint(check.msg, true);
+      renameName.focus();
+      return;
+    }
+    const targetPath = dir ? dir + '/' + check.name : check.name;
+    // 名字没动：直接关窗收工
+    if (targetPath === oldPath) { closeRenameDialog(); return; }
+    // 同目录重名（排除它自己）
+    if (currentFiles.some(f => (f.path || f.name) === targetPath)) {
+      setRenameHint('同目录下已存在「' + check.name + '」，请换个名字', true);
+      renameName.focus();
+      return;
+    }
+
+    let parentDir, fileHandle;
+    try {
+      parentDir = await resolveDirHandle(dir);
+      fileHandle = await parentDir.getFileHandle(baseNameOf(oldPath));
+    } catch (e) {
+      console.error(e);
+      setRenameHint('找不到该文件（可能已被移动或删除），请「刷新」后重试', true);
+      return;
+    }
+    if (typeof fileHandle.move !== 'function') {
+      setRenameHint('当前浏览器不支持重命名（需要 Chrome 124+），请升级后重试', true);
+      return;
+    }
+
+    btnRenameOk.disabled = true;
+    try {
+      await fileHandle.move(parentDir, check.name);
+    } catch (e) {
+      console.error(e);
+      const errName = e && e.name;
+      if (errName === 'NotAllowedError' || errName === 'SecurityError') {
+        setRenameHint('没有写入权限：这个目录是以只读方式打开的，请用「加载文件夹」重新选择目录', true);
+      } else if (errName === 'InvalidModificationError' || errName === 'NoModificationAllowedError') {
+        setRenameHint('无法重命名：目标名字与现有项目冲突', true);
+      } else {
+        setRenameHint('重命名失败：' + ((e && e.message) || '未知错误'), true);
+      }
+      return;
+    } finally {
+      btnRenameOk.disabled = false;
+    }
+
+    closeRenameDialog();
+    // 改的是当前打开的文件：currentFile 跟着换（编辑内容不变，不用重载）
+    if (currentFile === oldPath) currentFile = targetPath;
+    setStatus('已将 ' + baseNameOf(oldPath) + ' 重命名为 ' + check.name, 'success');
+    try {
+      currentFiles = await collectMarkdownFiles(currentFolderHandle);
+      await renderFileList();
+      updateActiveFileItem();
+    } catch (e) {
+      console.error(e);
+    }
+  }
+
+  async function deleteFileItem(path) {
+    const base = baseNameOf(path);
+    let msg = '确定删除「' + path + '」吗？\n文件将从磁盘删除，不可恢复。';
+    if (path === currentFile && hasUnsavedEdits()) {
+      msg = '「' + base + '」有未保存的修改，删除后修改也会一起丢失。\n' + msg;
+    }
+    if (!window.confirm(msg)) return;
+
+    let fileHandle;
+    try {
+      const dir = await resolveDirHandle(dirOfPath(path));
+      fileHandle = await dir.getFileHandle(base);
+    } catch (e) {
+      console.error(e);
+      setStatus('删除失败：找不到文件（可能已被移动或删除），请「刷新」后重试', 'error');
+      return;
+    }
+    if (typeof fileHandle.remove !== 'function') {
+      setStatus('当前浏览器不支持删除文件（需要 Chrome 124+），请升级后重试', 'error');
+      return;
+    }
+    try {
+      await fileHandle.remove();
+    } catch (e) {
+      console.error(e);
+      const errName = e && e.name;
+      if (errName === 'NotAllowedError' || errName === 'SecurityError') {
+        setStatus('没有写入权限：这个目录是以只读方式打开的，请用「加载文件夹」重新选择目录', 'error');
+      } else {
+        setStatus('删除失败：' + ((e && e.message) || '未知错误'), 'error');
+      }
+      return;
+    }
+
+    const wasCurrent = path === currentFile;
+    if (wasCurrent) currentFile = null;
+    setStatus('已删除 ' + path, 'success');
+    try {
+      currentFiles = await collectMarkdownFiles(currentFolderHandle);
+      await renderFileList();
+    } catch (e) {
+      console.error(e);
+    }
+    if (wasCurrent) {
+      // 删的是正在看的文件：列表还有就打开第一个，没有就回空状态
+      if (currentFiles.length) {
+        await loadFile(currentFiles[0].path || currentFiles[0].name);
+      } else {
+        applySurface();
+        showEmptyState('文件已删除');
+      }
+    } else {
+      updateActiveFileItem();
+    }
   }
 
   async function moveFileToDir(sourcePath, targetDir) {
@@ -2199,9 +2373,8 @@
     newFileModal.classList.add('hidden');
   }
 
-  // 校验文件名；targetDir 是新建的目标目录（'' = 根目录），重名检查只看这个目录。
-  // 返回 { ok, name } 或 { ok: false, msg }
-  function validateNewFileName(raw, targetDir) {
+  // 文件名通用校验（新建 / 重命名共用）：返回 { ok, name } 或 { ok: false, msg }
+  function sanitizeFileName(raw) {
     const name = String(raw || '').trim();
     if (!name) return { ok: false, msg: '请输入文件名' };
     if (/[\\/]/.test(name)) return { ok: false, msg: '文件名不能包含路径分隔符（\\ 或 /）' };
@@ -2218,14 +2391,20 @@
     if (ext !== 'md' && ext !== 'markdown') {
       return { ok: false, msg: '只支持 .md / .markdown 文件' };
     }
+    return { ok: true, name: finalName };
+  }
 
+  // 校验新建文件名；targetDir 是新建的目标目录（'' = 根目录），重名检查只看这个目录。
+  function validateNewFileName(raw, targetDir) {
+    const s = sanitizeFileName(raw);
+    if (!s.ok) return s;
     // 重名必须在这里挡掉：getFileHandle 的 create:true 在文件已存在时会直接返回它，
     // 后面的写入会把原有内容覆盖掉。只和目标目录里的文件比（子目录里重名不算冲突）
-    const targetPath = targetDir ? targetDir + '/' + finalName : finalName;
-    if (currentFiles.some(f => f.path === targetPath)) {
-      return { ok: false, msg: '目标目录下已存在「' + finalName + '」，请换个名字' };
+    const targetPath = targetDir ? targetDir + '/' + s.name : s.name;
+    if (currentFiles.some(f => (f.path || f.name) === targetPath)) {
+      return { ok: false, msg: '目标目录下已存在「' + s.name + '」，请换个名字' };
     }
-    return { ok: true, name: finalName };
+    return s;
   }
 
   // 把浏览器的写入类异常翻译成用户能看懂的话
@@ -2327,6 +2506,22 @@
   // 点弹窗外的遮罩关闭（点弹窗内部不关）
   newFileModal.addEventListener('mousedown', (e) => {
     if (e.target === newFileModal) closeNewFileDialog();
+  });
+
+  // 重命名弹窗：与新建弹窗同一套交互（Enter 确认 / Esc 取消 / 点遮罩关闭）
+  btnRenameOk.addEventListener('click', commitRename);
+  btnRenameCancel.addEventListener('click', closeRenameDialog);
+  renameModal.addEventListener('mousedown', (e) => {
+    if (e.target === renameModal) closeRenameDialog();
+  });
+  renameName.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      commitRename();
+    } else if (e.key === 'Escape') {
+      e.stopPropagation();
+      closeRenameDialog();
+    }
   });
 
   btnRefresh.addEventListener('click', refreshCurrentFile);
@@ -2687,8 +2882,18 @@
   btnViewToc.addEventListener('click', () => setSidebarView('toc'));
 
   fileListEl.addEventListener('click', (e) => {
+    if (e.target.closest('.file-menu-btn')) return;   // 「⋯」按钮有自己的菜单，不开文件
     const item = e.target.closest('.file-item');
     if (!item) return;
+    openFileFromList(item.dataset.path);
+  });
+  // .file-item 改成了 div（按钮里不能套按钮），回车 / 空格打开的能力在这里补回
+  fileListEl.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    if (e.target.closest('.file-menu-btn')) return;
+    const item = e.target.closest('.file-item');
+    if (!item) return;
+    e.preventDefault();
     openFileFromList(item.dataset.path);
   });
 

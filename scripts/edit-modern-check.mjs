@@ -180,6 +180,11 @@ function initScriptWritable({ dir, seed }) {
         dest.__files.set(n, f);
         f.__parent = dest;
       },
+      // FileSystemHandle.remove()（Chrome 124+）：从父目录摘除
+      async remove() {
+        if (f.__parent) f.__parent.__files.delete(f.name);
+        f.__parent = null;
+      },
     };
     return f;
   };
@@ -512,6 +517,117 @@ const browser = await launchChromium();
   await clickItem('plain.md');
   check('E6', '新建文件前旧文件已兜底保存', dialogCount === 0 && (await value()).includes('WW'),
     `dialog=${dialogCount}`);
+
+  await page.context().close();
+}
+
+// ---------- 场景 F：文件项「⋯」菜单（重命名 / 删除，右对齐） ----------
+
+{
+  const page = await newPage(browser, {}, initScriptWritable);
+  const status = () => page.evaluate(() => document.getElementById('status').textContent);
+  const paths = () => page.evaluate(() =>
+    [...document.querySelectorAll('.file-item')].map((e) => e.dataset.path).sort());
+  const value = () => page.evaluate(() => document.querySelector('.CodeMirror').CodeMirror.getValue());
+  const clickItem = async (path) => {
+    await page.evaluate((p) => document.querySelector(`.file-item[data-path="${p}"]`).click(), path);
+    await page.waitForTimeout(900);
+  };
+  const openMenu = async (path) => {
+    await page.evaluate((p) =>
+      document.querySelector(`.file-item[data-path="${p}"] .file-menu-btn`).click(), path);
+    await page.waitForTimeout(300);
+  };
+  const menuItems = () => page.evaluate(() => {
+    const m = document.querySelector('.cm-tbl-rowmenu');
+    return m ? [...m.querySelectorAll('button')].map((b) => b.textContent) : null;
+  });
+  let dialogAction = 'accept';
+  page.on('dialog', (d) => { if (dialogAction === 'accept') d.accept(); else d.dismiss(); });
+
+  await page.click('#btn-load-folder');
+  await page.waitForTimeout(1100);
+
+  // F1/F2：「⋯」按钮存在且右对齐；点开是重命名/删除两个菜单项
+  const align = await page.evaluate(() => {
+    const item = document.querySelector('.file-item[data-path="plain.md"]');
+    const btn = item.querySelector('.file-menu-btn');
+    const ir = item.getBoundingClientRect(), br = btn.getBoundingClientRect();
+    return { itemRight: ir.right, btnRight: br.right, btnLeft: br.left };
+  });
+  check('F1', '「⋯」按钮右对齐在文件项内',
+    align.btnRight <= align.itemRight && align.btnRight >= align.itemRight - 40,
+    JSON.stringify(align));
+  await openMenu('plain.md');
+  const items = await menuItems();
+  check('F2', '菜单含「重命名 / 删除」两项',
+    !!items && items.includes('重命名') && items.includes('删除'), JSON.stringify(items));
+  const activeAfterMenu = await page.evaluate(() =>
+    (document.querySelector('.file-item.active') || {}).dataset?.path);
+  check('F3', '点「⋯」不会打开文件（当前文件不变）', activeAfterMenu === 'plain.md',
+    `active=${activeAfterMenu}`);
+  await page.keyboard.press('Escape');
+  await page.waitForTimeout(200);
+  check('F4', 'Esc 收起菜单', (await menuItems()) === null);
+
+  // F5/F6：重命名 plain.md → plain2.md，列表与状态更新
+  await openMenu('plain.md');
+  await page.evaluate(() => [...document.querySelectorAll('.cm-tbl-rowmenu-item')]
+    .find((b) => b.textContent === '重命名').click());
+  await page.waitForTimeout(300);
+  const prefilled = await page.evaluate(() => document.getElementById('rename-name').value);
+  check('F5', '重命名弹窗预填原文件名', prefilled === 'plain.md', prefilled);
+  await page.fill('#rename-name', 'plain2.md');
+  await page.click('#btn-rename-ok');
+  await page.waitForTimeout(1300);
+  check('F6', '重命名后列表更新、状态栏写明',
+    (await paths()).includes('plain2.md') && !(await paths()).includes('plain.md')
+    && (await status()).includes('重命名'), `${(await paths()).join(' | ')} / ${await status()}`);
+
+  // F7：重命名为同目录已有名字 → 拦截、弹窗不关
+  await openMenu('table.md');
+  await page.evaluate(() => [...document.querySelectorAll('.cm-tbl-rowmenu-item')]
+    .find((b) => b.textContent === '重命名').click());
+  await page.waitForTimeout(300);
+  await page.fill('#rename-name', 'plain2.md');
+  await page.click('#btn-rename-ok');
+  await page.waitForTimeout(400);
+  const hint7 = await page.evaluate(() => document.getElementById('rename-hint').textContent);
+  check('F7', '重名被拦截且弹窗保持打开', hint7.includes('已存在')
+    && await page.evaluate(() => !document.getElementById('rename-modal').classList.contains('hidden')),
+    hint7);
+  await page.click('#btn-rename-cancel');
+
+  // F8：删除非当前文件 → 列表移除，当前文件不受影响
+  await clickItem('plain2.md');
+  dialogAction = 'accept';
+  await openMenu('table.md');
+  await page.evaluate(() => [...document.querySelectorAll('.cm-tbl-rowmenu-item')]
+    .find((b) => b.textContent === '删除').click());
+  await page.waitForTimeout(1300);
+  check('F8', '删除后文件从列表消失', !(await paths()).includes('table.md'),
+    (await paths()).join(' | '));
+  check('F9', '删非当前文件，编辑器保持当前文件',
+    (await status()).includes('已删除') && (await value()) !== '', await status());
+
+  // F10：删除当前打开的文件 → 自动打开剩余的第一个
+  await clickItem('sub/nested.md');
+  await openMenu('sub/nested.md');
+  await page.evaluate(() => [...document.querySelectorAll('.cm-tbl-rowmenu-item')]
+    .find((b) => b.textContent === '删除').click());
+  await page.waitForTimeout(1400);
+  const active = await page.evaluate(() =>
+    (document.querySelector('.file-item.active') || {}).dataset?.path);
+  check('F10', '删除当前文件后自动打开剩余文件', active === 'plain2.md'
+    && (await value()).length > 0, `active=${active}`);
+
+  // F11：删除确认可取消，文件还在
+  dialogAction = 'dismiss';
+  await openMenu('plain2.md');
+  await page.evaluate(() => [...document.querySelectorAll('.cm-tbl-rowmenu-item')]
+    .find((b) => b.textContent === '删除').click());
+  await page.waitForTimeout(500);
+  check('F11', '删除确认可取消，文件未动', (await paths()).includes('plain2.md'));
 
   await page.context().close();
 }

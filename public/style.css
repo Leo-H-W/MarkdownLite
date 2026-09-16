@@ -429,6 +429,42 @@ html, body {
   font-weight: 500;
 }
 
+/* 文件项最右侧的「⋯」操作按钮（重命名 / 删除，逻辑见 app.js openFileItemMenu）。
+   平时透明，悬停行 / 当前文件行 / 键盘聚焦时显形；触屏没有悬停，常显。 */
+.file-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.file-menu-btn {
+  flex-shrink: 0;
+  margin-left: auto;            /* 右对齐：顶到行最右 */
+  padding: 0 5px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: #656d76;
+  font-size: 13px;
+  line-height: 18px;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.12s, background 0.12s, color 0.12s;
+}
+.file-item:hover .file-menu-btn,
+.file-item.active .file-menu-btn,
+.file-menu-btn:focus-visible {
+  opacity: 1;
+}
+.file-menu-btn:hover {
+  background: #e5e9ef;
+  color: #0969da;
+}
+@media (hover: none) {
+  .file-menu-btn { opacity: 1; }
+}
+
 /* 文件列表内拖动文件到其它目录（.file-dir 是投放目标，逻辑见 app.js moveFileToDir） */
 .file-item.dragging {
   opacity: .4;

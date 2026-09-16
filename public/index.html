@@ -16,7 +16,7 @@
     基础主题那批 .cm-s-default .cm-* 颜色就会生效，反而改变现有观感。
   -->
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/codemirror@5/lib/codemirror.min.css">
-  <link rel="stylesheet" href="style.css?v=32">
+  <link rel="stylesheet" href="style.css?v=33">
 </head>
 <body>
   <div class="app">
@@ -107,6 +107,21 @@
     </div>
   </div>
 
+  <div id="rename-modal" class="modal-overlay hidden">
+    <div class="modal">
+      <div class="modal-title">重命名文件</div>
+      <div class="modal-body">
+        <label class="modal-label" for="rename-name">新文件名</label>
+        <input id="rename-name" class="modal-input" type="text" autocomplete="off" spellcheck="false">
+        <p id="rename-hint" class="modal-hint"></p>
+      </div>
+      <div class="modal-actions">
+        <button id="btn-rename-cancel" class="btn">取消</button>
+        <button id="btn-rename-ok" class="btn btn-primary">重命名</button>
+      </div>
+    </div>
+  </div>
+
   <script src="https://cdn.jsdelivr.net/npm/codemirror@5/lib/codemirror.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/codemirror@5/addon/mode/overlay.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/codemirror@5/addon/selection/active-line.min.js"></script>
@@ -117,6 +132,6 @@
   <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/marked@12/marked.min.js"></script>
   <script src="md-render.js?v=5"></script>
-  <script src="app.js?v=54"></script>
+  <script src="app.js?v=55"></script>
 </body>
 </html>
