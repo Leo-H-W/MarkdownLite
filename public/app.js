@@ -613,6 +613,14 @@
   // 于是表现为「点倒数第二行才多出一行 | | | |」。
   const TABLE_SEP_RE = /^\s*\|(?:\s*:?-{3,}:?\s*\|)+\s*$/;
   const TABLE_COL_CLASS_PREFIX = 'cm-tbl-c';
+  // 单列最大宽度（em）。一个格子里塞整段文字时（竞品分析、长描述列），
+  // 不封顶会把列宽撑到几百 em：格子在编辑器里一行放不下，inline-block 挨个换行，
+  // 整表竖着摞 —— 一张表带坏全文档（D:/temp/daily_delete/test.md 实测）。
+  // 超出的内容在现代模式视图里被裁剪（CSS overflow:hidden），源文本不受影响。
+  const TABLE_MAX_COL_EM = 40;
+  // 每张表一个稳定 id，列宽样式按 id 生成（见 refreshTableMarks）。
+  // 不能用块序号：复用标注时序号会漂移，旧 markText 上的类名会对不上新规则。
+  let tableIdSeq = 0;
   // 单元格内的换行标记（Ctrl+Enter 插入，或作者手写）。兼容 <br> / <br/> / <br />
   const TABLE_BR_RE = /<br\s*\/?>/gi;
   // 每个表格块一份记录，便于「只重建变化的那张表」而不是全文推倒重来。
@@ -717,9 +725,11 @@
 
   let lastTableSignature = '';
 
-  // 单元格的类名：列号决定宽度（含换行的行还决定 left），表头行多一个表头样式
-  function cellClass(p, head) {
-    return 'cm-tbl-cell ' + TABLE_COL_CLASS_PREFIX + p + (head ? ' cm-tbl-head' : '');
+  // 单元格的类名：tid 定位列宽规则（每张表一套），cm-tbl-c<p> 只作列号钩子
+  //（测试与负外边距选择器 :not(.cm-tbl-c0) 在用，本身不再带任何样式）
+  function cellClass(p, head, tid) {
+    return 'cm-tbl-cell cm-tbl-t' + tid + '-c' + p + ' ' + TABLE_COL_CLASS_PREFIX + p
+      + (head ? ' cm-tbl-head' : '');
   }
 
   // 把单元格按 <br> 切成若干段 —— 一格里的一个「段」就是渲染后的一行。
@@ -760,7 +770,7 @@
     }
     for (const c of cells) {
       const last = c.pieces.length - 1;
-      const base = cellClass(c.p, head) + ' cm-tbl-abs';
+      const base = cellClass(c.p, head, b.tid) + ' cm-tbl-abs';
       const used = new Set();     // 已被空段占用的 <br>：一个 <br> 只能顶一行
       c.pieces.forEach((piece, k) => {
         const cls = base + ' cm-tbl-seg' + k
@@ -786,7 +796,7 @@
         const next = c.pieces[j + 1];
         if (!used.has(br) && next && next.to > next.from) {
           b.marks.push(cmEditor.markText({ line: n, ch: br.from }, { line: n, ch: br.to },
-            { className: 'cm-tbl-abs ' + TABLE_COL_CLASS_PREFIX + c.p + ' cm-tbl-seg' + (j + 1) + ' cm-tbl-br' }));
+            { className: 'cm-tbl-abs cm-tbl-t' + b.tid + '-c' + c.p + ' cm-tbl-seg' + (j + 1) + ' cm-tbl-br' }));
         }
       });
     }
@@ -825,7 +835,8 @@
       if (old && old.sig === sigs[i]) { next.push(old); continue; }   // 复用
       if (old) dropTableBlock(old);                                   // 内容变了，先摘旧标注
       next.push({ sig: sigs[i], from: blocks[i].from, to: blocks[i].to, sep: blocks[i].sep,
-                  marks: [], rowClasses: [], sepHandle: null, dirty: true });
+                  marks: [], rowClasses: [], sepHandle: null, dirty: true,
+                  tid: ++tableIdSeq, colLeft: [], colWidthEm: [] });
     }
     for (let i = blocks.length; i < prev.length; i++) dropTableBlock(prev[i]);  // 表格被删掉了
     tableBlocks = next;
@@ -835,10 +846,25 @@
     for (const b of dirty) b.dirty = false;
 
 
-    // 统计每列宽度（取所有行里该列最宽的一个），顺带记下最长的格子有几段（几行）
-    const widths = [];
+    // 每张表的列宽只按**本表**的内容算（以前的实现按全文档所有表取最大，
+    // 一张表里出现整段文字的长格子时，全文档每一张表的同列都被撑到一样的宽度，
+    // 表格在编辑器里一行放不下，格子竖着摞）。
+    // 列几何存在块上：复用的块带着旧几何与旧 tid，标注类名不用换。
     let maxSegs = 1;
-    for (const b of blocks) {
+    for (const b of next) {
+      if (b.colWidthEm.length) {   // 复用块：几何照旧，只需补统计段数
+        for (let n = b.from; n <= b.to; n++) {
+          if (n === b.sep) continue;
+          const text = cmEditor.getLine(n);
+          const pipes = pipePositions(text);
+          for (let p = 0; p + 1 < pipes.length; p++) {
+            const { pieces } = splitCellPieces(text, pipes[p] + 1, pipes[p + 1]);
+            maxSegs = Math.max(maxSegs, pieces.length);
+          }
+        }
+        continue;
+      }
+      const widths = [];
       for (let n = b.from; n <= b.to; n++) {
         if (n === b.sep) continue;
         const text = cmEditor.getLine(n);
@@ -857,6 +883,18 @@
           widths[p] = Math.max(widths[p] || 0, w);
         }
       }
+      // 用 em 而不是 ch：ch 是数字 0 的宽度（≈8px），而一个汉字就有 16px，
+      // 用 ch 算出来的宽度会把中文单元格挤到换行（实测表头「姓名」被撑成两行）。
+      // visualWidth 里 1 个 ASCII 记 1、1 个全角记 2，正好对应 0.5em / 1em；
+      // 再加 1.4em 覆盖左右内边距（各 0.5em）与边框、留一点余量，封顶 TABLE_MAX_COL_EM。
+      let left = 0.25;
+      for (let p = 0; p < widths.length; p++) {
+        const wEm = Math.min((widths[p] || 0) * 0.5 + 1.4, TABLE_MAX_COL_EM);
+        if (p) left -= 0.0625;
+        b.colLeft[p] = left;
+        b.colWidthEm[p] = wEm;
+        left += wEm;
+      }
     }
 
     let st = document.getElementById('cm-table-style');
@@ -865,33 +903,23 @@
       st.id = 'cm-table-style';
       document.head.appendChild(st);
     }
-    // 用 em 而不是 ch：ch 是数字 0 的宽度（≈8px），而一个汉字就有 16px，
-    // 用 ch 算出来的宽度会把中文单元格挤到换行（实测表头「姓名」被撑成两行）。
-    // visualWidth 里 1 个 ASCII 记 1、1 个全角记 2，正好对应 0.5em / 1em；
-    // 再加 1.4em 覆盖左右内边距（各 0.5em）与边框、留一点余量。
-    // 只有宽度真的变了才写回：重写 <style> 会触发整页样式重算，是这条路径上
-    // 最贵的一步，不能每次刷新都做。
-    //
-    // 含换行的行是绝对定位，除了宽度还得给三个几何量（数值取自实测）：
-    //   .cm-tbl-c<p>      左边界：基准是行的内边距盒（CodeMirror 给 .CodeMirror-line
+    // 列几何注入动态样式表，按表 id 一条规则：
+    //   .cm-tbl-t<tid>-c<p>  左边界：基准是行的内边距盒（CodeMirror 给 .CodeMirror-line
     //                     0 4px 内边距，所以先加 0.25em），再累加左边的列宽；
     //                     每往右一列还要减去 1px —— 文档流里
     //                     .cm-tbl-cell:not(.cm-tbl-c0) 有 -1px 的负外边距，
     //                     让相邻格子的 1px 边框重叠成一条（实测 c0/c1/c2 =
     //                     304 / 397.39 / 466.78，正是各减 1px）。
+    // 含换行的行是绝对定位，除了宽度还得给两个几何量（数值取自实测）：
     //   .cm-tbl-seg<k>    第 k 段的 top：每段就是格子里的第 k 行。
     //   .cm-tbl-mline<k>  行高：绝对定位的盒子不占位，整行高度得自己给。
-    // colLeft / colWidthEm 存下同一套数值：行末的「…」按钮要按它定位到最后一格右侧
+    // 只有规则真的变了才写回：重写 <style> 会触发整页样式重算，是这条路径上
+    // 最贵的一步，不能每次刷新都做。
     const rules = [];
-    const colLeft = [], colWidthEm = [];
-    let left = 0.25;
-    for (let p = 0; p < widths.length; p++) {
-      const wEm = (widths[p] || 0) * 0.5 + 1.4;
-      if (p) left -= 0.0625;
-      colLeft[p] = left;
-      colWidthEm[p] = wEm;
-      rules.push(`.live-preview .${TABLE_COL_CLASS_PREFIX}${p}{width:${wEm.toFixed(2)}em;left:${left.toFixed(2)}em}`);
-      left += wEm;
+    for (const b of next) {
+      for (let p = 0; p < b.colWidthEm.length; p++) {
+        rules.push(`.live-preview .cm-tbl-t${b.tid}-c${p}{width:${b.colWidthEm[p].toFixed(2)}em;left:${b.colLeft[p].toFixed(2)}em}`);
+      }
     }
     for (let k = 1; k <= maxSegs; k++) {
       rules.push(`.live-preview .cm-tbl-seg${k}{top:calc(${k} * var(--cm-tbl-cellh))}`);
@@ -947,14 +975,14 @@
         //   表头 -> 表格级操作（删除整张表），定位在整张表的右边界之外
         //   数据行 -> 行级操作（删除本行），定位在本行最后一格的右边界之外
         if (n === b.from) {
-          addTableMenuWidget(b, n, text.length, colLeft[rightmostCol] + colWidthEm[rightmostCol]
+          addTableMenuWidget(b, n, text.length, b.colLeft[rightmostCol] + b.colWidthEm[rightmostCol]
             + ROW_MENU_GAP_EM, '表格操作', openHeaderMenu);
         }
         if (n > b.sep && cells.length) {
           const lastCol = cells[cells.length - 1].p;
-          const rightEm = (colLeft[lastCol] !== undefined)
-            ? colLeft[lastCol] + colWidthEm[lastCol]
-            : colLeft[colLeft.length - 1] + colWidthEm[colWidthEm.length - 1];
+          const rightEm = (b.colLeft[lastCol] !== undefined)
+            ? b.colLeft[lastCol] + b.colWidthEm[lastCol]
+            : b.colLeft[b.colLeft.length - 1] + b.colWidthEm[b.colWidthEm.length - 1];
           addTableMenuWidget(b, n, text.length, rightEm + ROW_MENU_GAP_EM, '行操作', openRowMenu);
         }
 
@@ -973,7 +1001,7 @@
           const blank = c.to === c.from;
           b.marks.push(cmEditor.markText(
             { line: n, ch: c.from }, { line: n, ch: blank ? pipes[c.p + 1] + 1 : c.to },
-            { className: cellClass(c.p, n === b.from) + (blank ? ' cm-tbl-blank' : '') }));
+            { className: cellClass(c.p, n === b.from, b.tid) + (blank ? ' cm-tbl-blank' : '') }));
         }
       }
     }

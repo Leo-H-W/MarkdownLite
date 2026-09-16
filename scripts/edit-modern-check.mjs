@@ -223,10 +223,10 @@ function initScriptWritable({ dir, seed }) {
   } catch (e) {}
 }
 
-async function newPage(browser, seed, initFn = initScript) {
+async function newPage(browser, seed, initFn = initScript, dir = DIR) {
   const page = await (await browser.newContext({ viewport: { width: 1280, height: 800 } })).newPage();
   page.on('pageerror', (e) => errors.push(e.message));
-  await page.addInitScript(initFn, { dir: DIR, seed });
+  await page.addInitScript(initFn, { dir, seed });
   await page.goto(BASE);
   await page.waitForTimeout(500);
   return page;
@@ -628,6 +628,63 @@ const browser = await launchChromium();
     .find((b) => b.textContent === '删除').click());
   await page.waitForTimeout(500);
   check('F11', '删除确认可取消，文件未动', (await paths()).includes('plain2.md'));
+
+  await page.context().close();
+}
+
+// ---------- 场景 G：异构表格列宽隔离 + 单列封顶 ----------
+// 回归 D:/temp/daily_delete/test.md 的报障：一张表里有整段文字的长格子时，
+// 旧实现按全文档所有表取列宽，每张表的同列都被撑爆、格子竖着摞。
+
+{
+  const LONG = '这个问题描述非常长'.repeat(30);   // 270 字，远超单列上限
+  const WIDE_DOC = [
+    '| 名称 | 值 |',
+    '| --- | --- |',
+    '| 短 | 1 |',
+    '',
+    '| 维度 | 问题分类 | 详细问题描述 |',
+    '| --- | --- | --- |',
+    '| 关键质量问题 | 运维&交付类 | ' + LONG + ' |',
+  ].join('\n');
+  const page = await newPage(browser, {}, initScriptWritable,
+    { name: '宽表目录', files: [['wide.md', WIDE_DOC]], subs: [] });
+
+  await page.click('#btn-load-folder');
+  await page.waitForTimeout(1300);
+
+  // G1：两张表都标上了（第一张 4 格 + 第二张 6 格）
+  const cellCount = await page.evaluate(() => document.querySelectorAll('.cm-tbl-cell').length);
+  check('G1', '两张异构表都完成标注', cellCount === 10, `${cellCount} 格`);
+
+  // G2：两张表同列不同宽（列宽按本表内容算，不再全文档共享）
+  const widthsOf = (frag) => page.evaluate((f) => {
+    const line = [...document.querySelectorAll('.CodeMirror-line')].find((l) => l.textContent.includes(f));
+    if (!line) return null;
+    line.scrollIntoView({ block: 'center' });
+    return [...line.querySelectorAll('.cm-tbl-cell')].map((c) => c.getBoundingClientRect().width);
+  }, frag);
+  const emPx = await page.evaluate(() =>
+    parseFloat(getComputedStyle(document.querySelector('.CodeMirror')).fontSize));
+  const row1 = await widthsOf('名称');
+  const row2 = await widthsOf('关键质量问题');
+  check('G2', '列宽按表隔离：表2 的首格明显宽于表1',
+    !!row1 && !!row2 && row2[0] > row1[0] + 2 * emPx,
+    `表1首格=${row1 && Math.round(row1[0])}px 表2首格=${row2 && Math.round(row2[0])}px`);
+
+  // G3：含 270 字格子的列被封顶（≤42em，含内边距与边框的余量）
+  const head2 = await widthsOf('详细问题描述');
+  check('G3', '含 270 字格子的列被封顶（≤42em）',
+    !!head2 && Math.max(...head2) <= 42 * emPx,
+    `最宽表头=${head2 && Math.round(Math.max(...head2))}px = ${head2 && (Math.max(...head2) / emPx).toFixed(1)}em`);
+
+  // G4：行没有竖着摞 —— 同一张表的表头各格顶部对齐
+  const tops = await page.evaluate(() => {
+    const line = [...document.querySelectorAll('.CodeMirror-line')].find((l) => l.textContent.includes('维度'));
+    return [...line.querySelectorAll('.cm-tbl-cell')].map((c) => Math.round(c.getBoundingClientRect().top));
+  });
+  check('G4', '同一行各格顶部对齐（未换行摞叠）',
+    tops.length === 3 && tops.every((t) => t === tops[0]), tops.join(','));
 
   await page.context().close();
 }
