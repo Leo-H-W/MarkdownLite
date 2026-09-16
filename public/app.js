@@ -1972,9 +1972,33 @@
     }
   }
 
+  // 编辑器里有没有没写盘的修改。基准是 lastSavedText（读进来 / 上一次保存的内容），
+  // 不是 currentMarkdownText —— 现代模式常驻编辑态下，两者从第一次击键起就分叉。
+  function hasUnsavedEdits() {
+    if (!isEditMode || !currentFile) return false;
+    const now = cmEditor ? cmEditor.getValue() : (editorEl ? editorEl.value : '');
+    return now !== lastSavedText;
+  }
+
+  // 离开当前文件前兜底保存（切换文件 / 目录、新建文件时调用）。
+  // 返回 false = 保存失败：调用方必须中止后续操作 —— 编辑内容还留在编辑器里没丢，
+  // 静默继续才是真的丢数据。saveCurrentFile(true) 不刷「已保存」状态，避免盖住后续状态栏。
+  async function saveUnsavedBeforeLeave() {
+    if (!hasUnsavedEdits()) return true;
+    try {
+      await saveCurrentFile(true);
+      return true;
+    } catch (e) {
+      setStatus('操作中止：当前文件的修改保存失败，编辑内容仍保留在编辑器里', 'error');
+      return false;
+    }
+  }
+
   // 加载目录句柄：扫描目录中的 Markdown 文件并渲染目标文件。
   // selectFolder（手动选择文件夹）与拖放打开（新标签页）共用此逻辑。
   async function loadFolderHandle(dirHandle, preferredFileName) {
+    // 换目录前先兜住未保存的修改，保存失败就中止，别带着一肚子没写盘的字切走
+    if (!(await saveUnsavedBeforeLeave())) return;
     clearImageCache();
     currentFolderHandle = dirHandle;
     folderLabel.textContent = dirHandle.name;
@@ -2030,6 +2054,8 @@
   async function loadFile(path) {
     const entry = findEntryByPath(path);
     if (!entry) return;
+    // 切换文件会整体换掉编辑器内容，先兜住未保存的修改（保存失败则中止切换）
+    if (!(await saveUnsavedBeforeLeave())) return;
     setStatus('读取文件...');
     try {
       currentFile = entry.path || entry.name;
@@ -2052,6 +2078,14 @@
   // 两件事互相独立 —— 没有打开任何文件时，仍然会把文件列表刷新一遍
   // （否则加载了空目录、或当前文件被移除后就再也扫不到新增的文件了）。
   async function refreshCurrentFile() {
+    // 刷新的语义就是「丢弃内存里的修改、重新读磁盘」，所以脏状态下要先确认「丢弃」；
+    // 取消则什么都不动，修改留在编辑器里
+    if (hasUnsavedEdits()) {
+      if (!window.confirm('当前文件有未保存的修改。\n刷新会丢弃这些修改并重新从磁盘读取，确定刷新吗？')) {
+        setStatus('已取消刷新，修改仍保留');
+        return;
+      }
+    }
     // 没有目录句柄（拖入的单个文件）时无从扫描，只能重读该文件本身
     if (!currentFolderHandle) {
       if (!currentFile) {
@@ -2229,6 +2263,11 @@
   async function createNewFile() {
     if (!currentFolderHandle) {
       setNewFileHint('请先加载文件夹', true);
+      return;
+    }
+    // 创建成功后会自动打开新文件、整体换掉编辑器内容，先兜住当前文件的未保存修改
+    if (!(await saveUnsavedBeforeLeave())) {
+      setNewFileHint('已中止：当前文件的修改保存失败，请处理后重试', true);
       return;
     }
     const targetDir = newFileTargetDir();

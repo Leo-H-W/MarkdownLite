@@ -105,18 +105,24 @@ const errors = [];
 page.on('pageerror', (e) => errors.push(e.message));
 
 await page.addInitScript(() => {
-  const state = { content: '' };
-  window.__setDoc = (t) => { state.content = t; };
-  const fileHandle = {
-    kind: 'file', name: 't.md',
-    async getFile() { return new File([state.content], 't.md', { type: 'text/markdown' }); },
+  // 每份内容一个独立的文件对象（generation 语义）：
+  // __setDoc 不是改老对象的内容，而是换一个新对象。这样应用「切换前兜底保存」
+  // 时写到的老句柄不会影响新内容 —— 与真实世界里外部工具改文件、应用按路径
+  // 重新解析句柄的行为一致。若共用同一个 content 变量，保存会把 __setDoc 刚换的
+  // 内容冲掉，loadDoc 加载的就还是旧文档。
+  const mkFile = (content) => ({
+    kind: 'file', name: 't.md', __c: content,
+    async getFile() { return new File([this.__c], 't.md', { type: 'text/markdown' }); },
     async createWritable() {
-      return { async write(d) { state.content = String(d); }, async close() {} };
+      const h = this;
+      return { async write(d) { h.__c = String(d); }, async close() {} };
     },
-  };
+  });
+  let current = mkFile('');
+  window.__setDoc = (t) => { current = mkFile(t); };
   const dirHandle = {
     kind: 'directory', name: '假目录',
-    async *entries() { yield ['t.md', fileHandle]; },
+    async *entries() { yield ['t.md', current]; },
     async queryPermission() { return 'granted'; },
     async requestPermission() { return 'granted'; },
   };

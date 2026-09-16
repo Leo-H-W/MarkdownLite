@@ -444,6 +444,78 @@ const browser = await launchChromium();
   await page.context().close();
 }
 
+// ---------- 场景 E：未保存修改的保护（刷新确认 / 切换前兜底保存） ----------
+
+{
+  const page = await newPage(browser, {}, initScriptWritable);
+  const status = () => page.evaluate(() => document.getElementById('status').textContent);
+  const value = () => page.evaluate(() => document.querySelector('.CodeMirror').CodeMirror.getValue());
+  const clickItem = async (path) => {
+    await page.evaluate((p) => document.querySelector(`.file-item[data-path="${p}"]`).click(), path);
+    await page.waitForTimeout(900);
+  };
+  // 统一的弹窗处理：E1 要取消、E2 要确认，其余场景断言「根本不该弹窗」
+  let dialogAction = 'dismiss', dialogCount = 0;
+  page.on('dialog', (d) => { dialogCount++; if (dialogAction === 'accept') d.accept(); else d.dismiss(); });
+  // 打两个字符并留在编辑器里（不撤销）
+  const typeKeep = async () => {
+    await page.mouse.click(600, 200);
+    await page.waitForTimeout(250);
+    await page.keyboard.type('WW');
+    await page.waitForTimeout(250);
+  };
+
+  await page.click('#btn-load-folder');
+  await page.waitForTimeout(1100);
+
+  // E1：脏状态下刷新 → 弹确认框，取消 → 修改保留
+  await clickItem('plain.md');
+  await typeKeep();
+  dialogAction = 'dismiss'; dialogCount = 0;
+  await page.click('#btn-refresh');
+  await page.waitForTimeout(500);
+  check('E1', '脏状态刷新会弹确认框', dialogCount === 1, `dialog=${dialogCount}`);
+  check('E2', '取消刷新后修改仍保留', (await value()).includes('WW')
+    && (await status()).includes('已取消刷新'), await status());
+
+  // E2b：确认刷新 → 丢弃修改，内容回到磁盘版本
+  dialogAction = 'accept'; dialogCount = 0;
+  await page.click('#btn-refresh');
+  await page.waitForTimeout(900);
+  check('E3', '确认刷新后内容回到磁盘版本', (await value()) === PLAIN_DOC,
+    JSON.stringify((await value()).slice(0, 30)));
+
+  // E4：脏状态切换文件 → 不弹窗、自动保存；切回来修改还在
+  await typeKeep();
+  dialogAction = 'accept'; dialogCount = 0;   // 兜底：万一误弹窗也由这里处理，之后用计数断言
+  await clickItem('table.md');
+  await clickItem('plain.md');
+  check('E4', '切换文件不弹窗且自动保存', dialogCount === 0 && (await value()).includes('WW'),
+    `dialog=${dialogCount}`);
+
+  // E5：脏状态更换文件夹 → 自动保存，重载后首个文件带着修改
+  await typeKeep();
+  dialogCount = 0;
+  await page.click('#btn-load-folder');
+  await page.waitForTimeout(1400);
+  check('E5', '更换文件夹自动保存修改（重载后直接打开带修改的文件）',
+    dialogCount === 0 && (await value()).includes('WW'), `dialog=${dialogCount}`);
+
+  // E6：脏状态新建文件 → 旧文件先保存；切回验证
+  await typeKeep();
+  dialogCount = 0;
+  await page.click('#btn-new-file');
+  await page.waitForTimeout(300);
+  await page.fill('#new-file-name', 'zz');
+  await page.click('#btn-new-file-create');
+  await page.waitForTimeout(1400);
+  await clickItem('plain.md');
+  check('E6', '新建文件前旧文件已兜底保存', dialogCount === 0 && (await value()).includes('WW'),
+    `dialog=${dialogCount}`);
+
+  await page.context().close();
+}
+
 await browser.close();
 
 console.log(`\nedit-modern 结果：${pass} 项通过 / ${fail} 项失败`);
