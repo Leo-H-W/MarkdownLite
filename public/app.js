@@ -130,19 +130,66 @@
   // 图片相对路径 -> objectURL，避免同一图片被重复读取
   const imageUrlCache = new Map();
 
+  // ── 编辑器用的 mode ───────────────────────────────────────────────────
+  // highlightFormatting 让语法标记带上 cm-formatting* class，现代模式靠它隐藏标记。
+  // 传统模式没有对应 CSS 规则，所以开启它对现有外观零影响。
+  //
+  // strikethrough 必须关掉：CM5 自带的删除线把单个 ~ 也当定界符
+  // （mode/markdown/markdown.js 里 `ch === '~' && stream.eatWhile(ch)` 后直接切换状态），
+  // 于是「1~100、2~5」这种范围写法会被误判成删除线，两个 ~ 还会被当成标记隐藏掉，
+  // 直接显示成「1100、25」。真正的 ~~...~~ 改由 markText 单独标注（见 refreshStrikeMarks）。
+  // 关掉它不影响传统模式：style.css 本来就没有样式化 cm-strikethrough / cm-formatting-strikethrough。
+  const BASE_MODE = { name: 'gfm', highlightFormatting: true, strikethrough: false };
+  const TABLE_PLAIN_MODE = 'markdownlite-tableplain';
+  let tablePlainModeDefined = false;
+
+  // 现代模式的表格行不参与 markdown 语法着色，用它包一层。
+  //
+  // 为什么必须这么做：CodeMirror 会把「被 token 边界切开的 markText」拆成多个相邻
+  // span，并把标记的类名复制到每一段上。表格单元格的标注（.cm-tbl-cell）覆盖整格，
+  // 只要格子里有会成 token 的东西（`\_` 转义、`[` 链接括号、`**` 强调、反引号行内
+  // 代码……），整格就被劈成好几个 span，而每个 span 都带着 cm-tbl-cell 的宽度与边框
+  // —— 一个格子渲染成多个盒子，列宽、对齐全乱，表头还会折行。
+  // 实测 D:/temp/daily_delete/test.md 那张 7 列表：一格 "ap\_num\_fanwei" 被劈成
+  // 5 个盒子，整表标出 133 个格子（正确值是 105），表头被撑成两行、数据行整体错位。
+  //
+  // 表格行整行不产出 token，格子里就只剩我们自己打的标注，一格正好一个 span。
+  // 代价是格子内不再显示行内语法样式（**粗体**、`代码` 按源码显示）—— 但它们本来
+  // 就被劈成多个盒子、根本没法看，两者相权取对齐。传统模式不画表格，用不着这个包装。
+  //
+  // 围栏代码块里的「表格行」不算表格，照旧交给 base（自己跟一遍围栏状态）。
+  function ensureTablePlainMode() {
+    if (tablePlainModeDefined || typeof CodeMirror === 'undefined') return;
+    tablePlainModeDefined = true;
+    CodeMirror.defineMode(TABLE_PLAIN_MODE, function (config) {
+      const base = CodeMirror.getMode(config, BASE_MODE);
+      return {
+        startState: function () { return { base: base.startState(), fence: null }; },
+        copyState: function (s) { return { base: base.copyState(s.base), fence: s.fence }; },
+        token: function (stream, state) {
+          const line = stream.string;
+          const fence = line.match(/^\s*(`{3,}|~{3,})/);
+          if (fence) {
+            if (!state.fence) state.fence = fence[1][0];
+            else if (fence[1][0] === state.fence) state.fence = null;
+            return base.token(stream, state.base);
+          }
+          if (!state.fence && TABLE_ROW_RE.test(line)) { stream.skipToEnd(); return null; }
+          return base.token(stream, state.base);
+        },
+        indent: base.indent,
+        blankLine: function (s) { return base.blankLine && base.blankLine(s.base); },
+        innerMode: function (s) { return { state: s.base, mode: base }; },
+      };
+    });
+  }
+
   // CodeMirror 编辑器实例（可选增强，初始化失败时回退到 textarea）
   let cmEditor = null;
   try {
     cmEditor = CodeMirror.fromTextArea(editorEl, {
-      // highlightFormatting 让语法标记带上 cm-formatting* class，现代模式靠它隐藏标记。
-      // 传统模式没有对应 CSS 规则，所以开启它对现有外观零影响。
-      //
-      // strikethrough 必须关掉：CM5 自带的删除线把单个 ~ 也当定界符
-      // （mode/markdown/markdown.js 里 `ch === '~' && stream.eatWhile(ch)` 后直接切换状态），
-      // 于是「1~100、2~5」这种范围写法会被误判成删除线，两个 ~ 还会被当成标记隐藏掉，
-      // 直接显示成「1100、25」。真正的 ~~...~~ 改由 markText 单独标注（见 refreshStrikeMarks）。
-      // 关掉它不影响传统模式：style.css 本来就没有样式化 cm-strikethrough / cm-formatting-strikethrough。
-      mode: { name: 'gfm', highlightFormatting: true, strikethrough: false },
+      // 起始用不带表格包装的 mode；现代模式与否由 applySurface() 设置
+      mode: BASE_MODE,
       // 保留 'github'：npm 包里其实没有这个主题（见 index.html 顶部说明），
       // 它的作用是让容器带 cm-s-github 类，从而不启用 cm-s-default 的默认 token 配色。
       // 编辑器实际配色来自 style.css 的 .content-wrapper .cm-* 规则。
@@ -2211,6 +2258,10 @@
       cmEditor.setOption('singleCursorHeightPerLine', !isModern);
       // 列表续行 / 表格 Tab 只在现代模式生效，传统模式清空以恢复默认按键
       cmEditor.setOption('extraKeys', isModern ? MODERN_EXTRA_KEYS : {});
+      // 现代模式的表格行不能套 markdown 语法样式，否则一个格子会被 token 边界
+      // 劈成多个盒子（详见 ensureTablePlainMode 的说明）
+      if (isModern) ensureTablePlainMode();
+      cmEditor.setOption('mode', isModern ? TABLE_PLAIN_MODE : BASE_MODE);
       if (editorVisible) cmEditor.refresh();
       // 删除线 / 任务框 / 表格标注只在现代模式需要，离开时清掉避免残留
       if (isModern) {
