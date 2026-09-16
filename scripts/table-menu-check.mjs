@@ -14,7 +14,7 @@
  */
 import { createRequire } from 'node:module';
 
-const BASE = process.env.LMDK_URL || 'http://localhost:3456';
+const BASE = process.env.MARKDOWNLITE_URL || 'http://localhost:3456';
 const require = createRequire(import.meta.url);
 
 function loadPlaywright() {

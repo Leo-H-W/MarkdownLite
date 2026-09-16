@@ -14,7 +14,7 @@
  */
 import { createRequire } from 'node:module';
 
-const BASE = process.env.LMDK_URL || 'http://localhost:3456';
+const BASE = process.env.MARKDOWNLITE_URL || 'http://localhost:3456';
 const require = createRequire(import.meta.url);
 
 function loadPlaywright() {
@@ -518,10 +518,15 @@ await setDoc(TABLE);
     '| m1<br>m2 | b2 | c2 |',
     '| a3 | b3 | c3 |',
   ].join('\n');
-  const buttons = () => page.evaluate(() => [...document.querySelectorAll('.cm-tbl-menu-btn')].map((b) => {
-    const r = b.getBoundingClientRect();
-    return { x: Math.round(r.x), y: Math.round(r.y), opacity: getComputedStyle(b).opacity };
-  }));
+  // 表头行与数据行共用 .cm-tbl-menu-btn（走的是同一个挂载函数），靠 title 区分：
+  // 表头挂的是「表格操作」（删整张表），数据行挂的是「行操作」（删本行）。
+  // 这里按 title 取，别把表头那个也算进数据行的数里。
+  const buttons = (title) => page.evaluate((t) => [...document.querySelectorAll('.cm-tbl-menu-btn')]
+    .filter((b) => b.title === t)
+    .map((b) => {
+      const r = b.getBoundingClientRect();
+      return { x: Math.round(r.x), y: Math.round(r.y), opacity: getComputedStyle(b).opacity };
+    }), title);
   const btnOfRow = (frag) => page.evaluate(`(() => {
     const l = [...document.querySelectorAll('.CodeMirror-line')].find((x) => x.textContent.includes(${JSON.stringify(frag)}));
     if (!l) return null;
@@ -534,12 +539,14 @@ await setDoc(TABLE);
   })()`);
 
   await setDoc(MENUTABLE);
-  const bs = await buttons();
-  check('M3', '按钮数量 = 数据行数（3），表头与分隔行没有', bs.length === 3, `${bs.length} 个`);
+  const bs = await buttons('行操作');
+  check('M3', '行菜单按钮数量 = 数据行数（3），表头与分隔行没有', bs.length === 3, `${bs.length} 个`);
+  const headerBs = await buttons('表格操作');
+  check('M3', '表头只挂 1 个表格菜单（不是行菜单）', headerBs.length === 1, `${headerBs.length} 个`);
   await page.mouse.move(1150, 700);            // 先把鼠标挪开，免得 :hover 多亮一个
   await setCursorAt(2, 3);                     // 光标落在第 3 行（a1 行）
   await page.waitForTimeout(250);
-  const op = (await buttons()).map((b) => b.opacity);
+  const op = (await buttons('行操作')).map((b) => b.opacity);
   check('M1', '光标所在行按钮显形，其余行不显示', op[0] === '1' && op[1] === '0' && op[2] === '0', op.join(','));
   const normal = await btnOfRow('a1');
   check('M1', '按钮在最后一格之外（表格右侧）', normal?.outside === true, JSON.stringify(normal));
