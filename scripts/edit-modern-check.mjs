@@ -746,6 +746,43 @@ const browser = await launchChromium();
   await page.context().close();
 }
 
+// ---------- 场景 I：列数过多的宽表降级为源码形态（碎片排版比源码更难读） ----------
+// 回归 test.md「# 02 质量改进需求」表：16 列压窄后每列只剩 3~4em、一列两三个
+// 字竖着切。判定：可用宽度平分给每列后仍低于 TABLE_MIN_COL_EM(6em) 就不渲染。
+
+{
+  const hdr16 = '| ' + Array.from({ length: 16 }, (_, i) => '列' + (i + 1)).join(' | ') + ' |';
+  const sep16 = '|' + ' --- |'.repeat(16);
+  const row16 = '| ' + Array.from({ length: 16 }, (_, i) => 'v' + (i + 1)).join(' | ') + ' |';
+  const I_DOC = [
+    hdr16, sep16, row16, '',
+    '| A | B | C | D | E | F |',
+    '| --- | --- | --- | --- | --- | --- |',
+    '| a | b | c | d | e | f |',
+  ].join('\n');
+  const page = await newPage(browser, {}, initScriptWritable,
+    { name: '宽表目录', files: [['i.md', I_DOC]], subs: [] });
+
+  await page.click('#btn-load-folder');
+  await page.waitForTimeout(1300);
+
+  const counts = await page.evaluate(() => {
+    const line16 = [...document.querySelectorAll('.CodeMirror-line')]
+      .find((l) => l.textContent.includes('列16'));
+    const line6 = [...document.querySelectorAll('.CodeMirror-line')]
+      .find((l) => l.textContent.includes('| a | b |'));
+    return {
+      wide: line16 ? line16.querySelectorAll('.cm-tbl-cell').length : -1,
+      narrow: line6 ? line6.querySelectorAll('.cm-tbl-cell').length : -1,
+    };
+  });
+  check('I1', '16 列宽表降级为源码形态（无格盒）', counts.wide === 0, `wide=${counts.wide}`);
+  check('I2', '同文档的 6 列表照常渲染（降级按表判定）', counts.narrow === 6,
+    `narrow=${counts.narrow}`);
+
+  await page.context().close();
+}
+
 await browser.close();
 
 console.log(`\nedit-modern 结果：${pass} 项通过 / ${fail} 项失败`);

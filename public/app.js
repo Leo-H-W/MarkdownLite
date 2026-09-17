@@ -618,6 +618,11 @@
   // 整表竖着摞 —— 一张表带坏全文档（D:/temp/daily_delete/test.md 实测）。
   // 超出的内容在现代模式视图里被裁剪（CSS overflow:hidden），源文本不受影响。
   const TABLE_MAX_COL_EM = 40;
+  // 单列可读宽度的下限（em，含内边距与边框）。列很多的宽表（实测 16 列的质量改进表）
+  // 即使按视口压窄，每列也只分得到 3~4em —— 一列只剩两三个字的碎片排版，
+  // 比源码还难读。这类表整段不渲染成表格，保持源码形态（跟传统模式对照着看）。
+  // 判定：可用宽度平分给每列后仍达不到这个宽度，就放弃渲染。
+  const TABLE_MIN_COL_EM = 6;
   // 每张表一个稳定 id，列宽样式按 id 生成（见 refreshTableMarks）。
   // 不能用块序号：复用标注时序号会漂移，旧 markText 上的类名会对不上新规则。
   let tableIdSeq = 0;
@@ -857,7 +862,30 @@
       i = to;
     }
 
-    const sigs = blocks.map((b) => blockSignature(b.from, b.to));
+    // 编辑器可视宽度（一次重建算一次）：既决定哪些表值得渲染，也用于后面的压窄。
+    // 余量取 48px：行内边距 8 + 起始缩进 4 + 竖滚动条占位与取整误差
+    //（按 12px 算实测还差 30px 被折行，宁多勿少 —— 压多了只是多裁剪一点内容）
+    const wrapper = cmEditor.getWrapperElement();
+    const fontPx = parseFloat(getComputedStyle(wrapper).fontSize) || 16;
+    const availPx = Math.max(160, wrapper.clientWidth - 48);
+    const perColPx = 18;                                       // 每列固定占位：padding 16 + border 2
+
+    // 列多到按可读宽度也放不进视口的表：整段保持源码形态，不渲染成表格。
+    // 实测 16 列的质量改进表压窄后每列只剩 3~4em，一列两三个字的碎片排版
+    // 比源码更难读。判定只看「列数 vs 可用宽」，与列内容无关。
+    const styleable = [];
+    for (const b of blocks) {
+      let cols = 0;
+      for (let n = b.from; n <= b.to; n++) {
+        if (n === b.sep) continue;
+        cols = Math.max(cols, pipePositions(cmEditor.getLine(n)).length - 1);
+      }
+      if ((availPx - cols * perColPx) / Math.max(1, cols) >= TABLE_MIN_COL_EM * fontPx) {
+        styleable.push(b);
+      }
+    }
+
+    const sigs = styleable.map((b) => blockSignature(b.from, b.to));
     const overall = sigs.join('\n');
     if (overall === lastTableSignature) return;
     lastTableSignature = overall;
@@ -865,17 +893,19 @@
     // 逐块比对，只重建真正变化的那一块。
     // markText 会随编辑自动位移，所以内容没变的块可以直接复用已有标注；
     // 否则改一张表就要把全文所有表格推倒重来（实测 40 张表时一次编辑要 1.2 秒）。
+    // 比对以 styleable 为准：某张表因「列太多」被降级为源码后，它后面的表
+    // 序号会前移 —— 签名对不上就重建，结果正确，只是这一次多画几张表。
     const prev = tableBlocks;
     const next = [];
-    for (let i = 0; i < blocks.length; i++) {
+    for (let i = 0; i < styleable.length; i++) {
       const old = prev[i];
       if (old && old.sig === sigs[i]) { next.push(old); continue; }   // 复用
       if (old) dropTableBlock(old);                                   // 内容变了，先摘旧标注
-      next.push({ sig: sigs[i], from: blocks[i].from, to: blocks[i].to, sep: blocks[i].sep,
+      next.push({ sig: sigs[i], from: styleable[i].from, to: styleable[i].to, sep: styleable[i].sep,
                   marks: [], rowClasses: [], sepHandle: null, dirty: true,
                   tid: ++tableIdSeq, colLeft: [], colWidthEm: [] });
     }
-    for (let i = blocks.length; i < prev.length; i++) dropTableBlock(prev[i]);  // 表格被删掉了
+    for (let i = styleable.length; i < prev.length; i++) dropTableBlock(prev[i]);  // 表格被删掉了
     tableBlocks = next;
 
     const dirty = next.filter((b) => b.dirty);
@@ -938,15 +968,10 @@
     // 编辑器开着 lineWrapping：不压窄的话折行点会落在格子上，inline-block 整个
     // 挪到下一行，整表竖着摞（test.md「全网智能2.0复盘总结」那张表实测 92em vs 视口 76em）。
     // 对已经压过的块是幂等的：压完总宽 ≈ 可用宽，下次会走 usedPx <= availPx 跳过。
-    // 注意每格真实占位 = 列宽 + 内边距 16px + 边框 2px（width 是 content-box），
+    // 每格真实占位 = 列宽 + 内边距 16px + 边框 2px（width 是 content-box），
     // 压窄时得把这份每列固定开销算进去，否则差几十像素还是会被折行（实测踩过）。
+    // availPx / perColPx / fontPx 在块扫描后已算好，直接复用。
     {
-      const wrapper = cmEditor.getWrapperElement();
-      const fontPx = parseFloat(getComputedStyle(wrapper).fontSize) || 16;
-      // 余量取 48px：行内边距 8 + 起始缩进 4 + 竖滚动条占位与取整误差
-      //（按 12px 算实测还差 30px 被折行，宁多勿少 —— 压多了只是多裁剪一点内容）
-      const availPx = Math.max(160, wrapper.clientWidth - 48);
-      const perColPx = 18;                                       // padding 16 + border 2
       for (const b of next) {
         if (!b.colWidthEm.length) continue;
         const contentPx = b.colWidthEm.reduce((s, w) => s + w, 0) * fontPx;
