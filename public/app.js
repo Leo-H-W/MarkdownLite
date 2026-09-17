@@ -621,6 +621,10 @@
   // 每张表一个稳定 id，列宽样式按 id 生成（见 refreshTableMarks）。
   // 不能用块序号：复用标注时序号会漂移，旧 markText 上的类名会对不上新规则。
   let tableIdSeq = 0;
+  // 段数规则 .cm-tbl-seg<k> / .cm-tbl-mline<k> 用到多大的 k。取历史最大值
+  //（只增不减）：自适应换行折出的段数标完才知道，且复用块的旧标注可能
+  // 还引用着更大的 k —— 多留几条用不到的规则无害，缺了行高会丢。
+  let tblSegRulesMax = 1;
   // 单元格内的换行标记（Ctrl+Enter 插入，或作者手写）。兼容 <br> / <br/> / <br />
   const TABLE_BR_RE = /<br\s*\/?>/gi;
   // 每个表格块一份记录，便于「只重建变化的那张表」而不是全文推倒重来。
@@ -692,6 +696,39 @@
     const parts = [];
     for (let n = from; n <= to; n++) parts.push(cmEditor.getLine(n));
     return parts.join('\n');
+  }
+
+  // 列宽折算成「半角单位预算」：宽度公式是 units*0.5 + 1.4em，反推即可。
+  // 不能留余量 —— 列宽本来就是按「最长一段 + 1.4em」算的，定义列宽的那段
+  // 必须恰好放得下，否则它会被自己的列宽折行（checklist C5 实测踩过）。
+  // 0.01 的 epsilon 只对浮点误差，不对内容。
+  function wrapBudgetUnits(b, p) {
+    return Math.max(4, (b.colWidthEm[p] - 1.4) * 2 + 0.01);
+  }
+
+  // 把一段文字按预算折成多段（自适应换行）：全角记 2、ASCII 记 1，
+  // 与 visualWidth / 列宽公式同一套单位。拆不开（预算够、或一个字就超预算）时
+  // 返回 null，调用方保留原单段。返回 { pieces, brs: [] }，pieces 首尾相接
+  // 覆盖原区间 —— 虚拟段之间没有 <br> 字面量，光标的落点由 markText 区间保证。
+  function wrapPieceByBudget(text, piece, budget) {
+    const pieces = [];
+    let units = 0, start = piece.from;
+    let i = piece.from;
+    while (i < piece.to) {
+      const cp = text.codePointAt(i);
+      const u = cp > 0x2e7f ? 2 : 1;
+      if (units + u > budget && units > 0) {
+        pieces.push({ from: start, to: i });
+        start = i;
+        units = 0;
+        continue;
+      }
+      units += u;
+      i += cp > 0xffff ? 2 : 1;
+    }
+    pieces.push({ from: start, to: piece.to });
+    if (pieces.length < 2) return null;
+    return { pieces, brs: [] };
   }
 
   function visualWidth(s) {
@@ -897,12 +934,39 @@
       }
     }
 
-    let st = document.getElementById('cm-table-style');
-    if (!st) {
-      st = document.createElement('style');
-      st.id = 'cm-table-style';
-      document.head.appendChild(st);
+    // 整表宽超出编辑器可视宽度时，按比例压窄本表所有列（格子里的内容裁剪，不换行）。
+    // 编辑器开着 lineWrapping：不压窄的话折行点会落在格子上，inline-block 整个
+    // 挪到下一行，整表竖着摞（test.md「全网智能2.0复盘总结」那张表实测 92em vs 视口 76em）。
+    // 对已经压过的块是幂等的：压完总宽 ≈ 可用宽，下次会走 usedPx <= availPx 跳过。
+    // 注意每格真实占位 = 列宽 + 内边距 16px + 边框 2px（width 是 content-box），
+    // 压窄时得把这份每列固定开销算进去，否则差几十像素还是会被折行（实测踩过）。
+    {
+      const wrapper = cmEditor.getWrapperElement();
+      const fontPx = parseFloat(getComputedStyle(wrapper).fontSize) || 16;
+      // 余量取 48px：行内边距 8 + 起始缩进 4 + 竖滚动条占位与取整误差
+      //（按 12px 算实测还差 30px 被折行，宁多勿少 —— 压多了只是多裁剪一点内容）
+      const availPx = Math.max(160, wrapper.clientWidth - 48);
+      const perColPx = 18;                                       // padding 16 + border 2
+      for (const b of next) {
+        if (!b.colWidthEm.length) continue;
+        const contentPx = b.colWidthEm.reduce((s, w) => s + w, 0) * fontPx;
+        const usedPx = contentPx + b.colWidthEm.length * perColPx;
+        if (usedPx <= availPx) continue;
+        const scale = Math.max(0.05, (availPx - b.colWidthEm.length * perColPx) / contentPx);
+        let left = 0.25;
+        for (let p = 0; p < b.colWidthEm.length; p++) {
+          b.colWidthEm[p] = Math.max(1, b.colWidthEm[p] * scale);
+          if (p) left -= 0.0625;
+          b.colLeft[p] = left;
+          left += b.colWidthEm[p];
+        }
+      }
     }
+
+    // 段数规则（.cm-tbl-seg<k> / .cm-tbl-mline<k>）用到多大的 k，要等标完才知道
+    // —— 自适应换行折出的虚拟段只在此刻才产生。先累计一个单调下限，标完再写规则。
+    tblSegRulesMax = Math.max(tblSegRulesMax, maxSegs);
+
     // 列几何注入动态样式表，按表 id 一条规则：
     //   .cm-tbl-t<tid>-c<p>  左边界：基准是行的内边距盒（CodeMirror 给 .CodeMirror-line
     //                     0 4px 内边距，所以先加 0.25em），再累加左边的列宽；
@@ -910,26 +974,16 @@
     //                     .cm-tbl-cell:not(.cm-tbl-c0) 有 -1px 的负外边距，
     //                     让相邻格子的 1px 边框重叠成一条（实测 c0/c1/c2 =
     //                     304 / 397.39 / 466.78，正是各减 1px）。
-    // 含换行的行是绝对定位，除了宽度还得给两个几何量（数值取自实测）：
-    //   .cm-tbl-seg<k>    第 k 段的 top：每段就是格子里的第 k 行。
-    //   .cm-tbl-mline<k>  行高：绝对定位的盒子不占位，整行高度得自己给。
-    // 只有规则真的变了才写回：重写 <style> 会触发整页样式重算，是这条路径上
-    // 最贵的一步，不能每次刷新都做。
+    // 含换行的行是绝对定位，除了宽度还需两个几何量（.cm-tbl-seg<k> 段顶、
+    // .cm-tbl-mline<k> 行高），它们的规则在标注重建之后才写（函数末尾），
+    // 因为虚拟换行产生的段数要标完才确定。只有规则真的变了才写回：重写
+    // <style> 会触发整页样式重算，是这条路径上最贵的一步，不能每次刷新都做。
     const rules = [];
     for (const b of next) {
       for (let p = 0; p < b.colWidthEm.length; p++) {
         rules.push(`.live-preview .cm-tbl-t${b.tid}-c${p}{width:${b.colWidthEm[p].toFixed(2)}em;left:${b.colLeft[p].toFixed(2)}em}`);
       }
     }
-    for (let k = 1; k <= maxSegs; k++) {
-      rules.push(`.live-preview .cm-tbl-seg${k}{top:calc(${k} * var(--cm-tbl-cellh))}`);
-    }
-    for (let k = 2; k <= maxSegs; k++) {
-      rules.push(`.live-preview .CodeMirror-line.cm-tbl-mline${k}` +
-        `{height:calc(${k} * var(--cm-tbl-cellh)) !important}`);
-    }
-    const css = rules.join('\n');
-    if (st.textContent !== css) st.textContent = css;
 
     // 只给需要重建的块打标注；复用中的块由 CodeMirror 自己维护标注位置
     for (const b of dirty) {
@@ -966,7 +1020,17 @@
         const cells = [];
         for (let p = 0; p + 1 < pipes.length; p++) {
           const from = pipes[p] + 1, to = pipes[p + 1];
-          cells.push(Object.assign({ p, from, to }, splitCellPieces(text, from, to)));
+          let cell = Object.assign({ p, from, to }, splitCellPieces(text, from, to));
+          // 自适应换行：单段且超出列宽的格子，按列宽预算折成多个「虚拟段」。
+          // 排版走与 <br> 多行完全相同的 markMultilineRow 通路（行高随内容增长），
+          // 内容全部可见，不再靠 overflow 裁剪。编辑后防抖重建会重新折算。
+          if (cell.pieces.length === 1 && cell.brs.length === 0
+              && cell.pieces[0].to > cell.pieces[0].from) {
+            const budget = wrapBudgetUnits(b, p);
+            const wrapped = wrapPieceByBudget(text, cell.pieces[0], budget);
+            if (wrapped) cell = Object.assign({ p, from, to }, wrapped);
+          }
+          cells.push(cell);
         }
         // 行末的「…」菜单按钮。分隔行不挂 —— 删掉它表格就不再是表格了。
         // 按钮放在两个渲染分支之前：含 <br> 的行走绝对定位网格，同样要有这个按钮。
@@ -987,6 +1051,7 @@
         }
 
         const segs = Math.max(1, ...cells.map((c) => c.pieces.length));
+        if (segs > tblSegRulesMax) tblSegRulesMax = segs;
         if (segs > 1) {
           markMultilineRow(b, n, cells, segs);
           continue;
@@ -1005,6 +1070,26 @@
         }
       }
     }
+
+    // 段数规则现在才写：标注重建里产生的虚拟换行段数到此已确定。
+    // 含换行的行是绝对定位，每段顶位与整行高度都由这两个规则给：
+    //   .cm-tbl-seg<k>    第 k 段的 top：每段就是格子里的第 k 行。
+    //   .cm-tbl-mline<k>  行高：绝对定位的盒子不占位，整行高度得自己给。
+    for (let k = 1; k <= tblSegRulesMax; k++) {
+      rules.push(`.live-preview .cm-tbl-seg${k}{top:calc(${k} * var(--cm-tbl-cellh))}`);
+    }
+    for (let k = 2; k <= tblSegRulesMax; k++) {
+      rules.push(`.live-preview .CodeMirror-line.cm-tbl-mline${k}` +
+        `{height:calc(${k} * var(--cm-tbl-cellh)) !important}`);
+    }
+    let st = document.getElementById('cm-table-style');
+    if (!st) {
+      st = document.createElement('style');
+      st.id = 'cm-table-style';
+      document.head.appendChild(st);
+    }
+    const css = rules.join('\n');
+    if (st.textContent !== css) st.textContent = css;
 
     updateSepReveal();   // 重建后按当前光标位置决定分隔行是否展开
 

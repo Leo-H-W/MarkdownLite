@@ -934,9 +934,12 @@ html {
 }
 
 /* 单元格：inline-block 才能吃宽高与边框。
-   相邻两格各画一条 1px 边会叠成 2px，用负外边距压回 1px（等价 border-collapse）。 */
+   相邻两格各画一条 1px 边会叠成 2px，用负外边距压回 1px（等价 border-collapse）。
+   white-space: nowrap —— 行宽超过视口时也要保持「一行」，由 refreshTableMarks 按比例
+   压窄列宽兜底；不然折行点落在格子上，inline-block 整个挪到下一行，整表竖着摞。 */
 .live-preview .CodeMirror-line .cm-tbl-cell {
   display: inline-block;
+  white-space: nowrap;
   padding: 4px 8px;
   border: 1px solid #d1d9e0;
   background: #ffffff;

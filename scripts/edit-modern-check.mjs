@@ -653,9 +653,10 @@ const browser = await launchChromium();
   await page.click('#btn-load-folder');
   await page.waitForTimeout(1300);
 
-  // G1：两张表都标上了（第一张 4 格 + 第二张 6 格）
+  // G1：两张表都标上了。注：自适应换行会让长格一个格子产生多段 span，
+  // 所以这里只断言「至少标出源文件里的 10 格」（少了 = 没标，多了 = 折行段）
   const cellCount = await page.evaluate(() => document.querySelectorAll('.cm-tbl-cell').length);
-  check('G1', '两张异构表都完成标注', cellCount === 10, `${cellCount} 格`);
+  check('G1', '两张异构表都完成标注', cellCount >= 10, `${cellCount} 段`);
 
   // G2：两张表同列不同宽（列宽按本表内容算，不再全文档共享）
   const widthsOf = (frag) => page.evaluate((f) => {
@@ -685,6 +686,62 @@ const browser = await launchChromium();
   });
   check('G4', '同一行各格顶部对齐（未换行摞叠）',
     tops.length === 3 && tops.every((t) => t === tops[0]), tops.join(','));
+
+  await page.context().close();
+}
+
+// ---------- 场景 H：超宽整表按比例压窄，保持一行（不竖摞） ----------
+// 回归 test.md「全网智能2.0复盘总结」表：3 列长文本合计 ~92em，超出 ~76em 视口，
+// 旧行为折行点落在格子上、inline-block 挪到下一行，整表竖着摞。
+
+{
+  const CELL = '这是一段很长的复盘结论文案，用来把列宽撑到远超视口'.repeat(2);  // ~90 字 → 封顶 40em
+  const H_DOC = [
+    '| 关键障碍 | 根因 | 针对性设计 |',
+    '| --- | --- | --- |',
+    `| ${CELL} | ${CELL} | ${CELL} |`,
+  ].join('\n');
+  const page = await newPage(browser, {}, initScriptWritable,
+    { name: '超宽表目录', files: [['h.md', H_DOC]], subs: [] });
+
+  await page.click('#btn-load-folder');
+  await page.waitForTimeout(1300);
+
+  const row = await page.evaluate(() => {
+    const line = [...document.querySelectorAll('.CodeMirror-line')]
+      .find((l) => l.textContent.includes('关键障碍'));
+    if (!line) return null;
+    line.scrollIntoView({ block: 'center' });
+    const cells = [...line.querySelectorAll('.cm-tbl-cell')];
+    const rs = cells.map((c) => c.getBoundingClientRect());
+    return { tops: rs.map((r) => Math.round(r.top)), rights: rs.map((r) => Math.round(r.right)) };
+  });
+  check('H1', '超宽表头行 3 格同处一行（未竖摞）',
+    !!row && row.tops.length === 3 && row.tops.every((t) => t === row.tops[0]),
+    JSON.stringify(row));
+  check('H2', '各格从左到右依次排开',
+    !!row && row.rights[0] < row.rights[1] && row.rights[1] < row.rights[2],
+    JSON.stringify(row));
+
+  // 数据行：自适应换行生效 —— 行按列宽折成多段、行变高，且**内容没有被裁剪**
+  const row2 = await page.evaluate(() => {
+    const line = [...document.querySelectorAll('.CodeMirror-line')]
+      .find((l) => l.textContent.includes('复盘结论文案'));
+    if (!line) return null;
+    const cells = [...line.querySelectorAll('.cm-tbl-cell')];
+    const seg0s = cells.filter((c) => c.classList.contains('cm-tbl-seg0'));   // 每格的首段
+    const segs = new Set(cells.map((c) => [...c.classList].find((k) => /^cm-tbl-seg\d+$/.test(k))));
+    return {
+      n: cells.length,
+      segCount: segs.size,
+      firstSegTops: seg0s.map((c) => Math.round(c.getBoundingClientRect().top)),
+      allText: cells.map((c) => c.textContent).join(''),
+    };
+  });
+  check('H3', '超宽数据行按列宽折行：行变高、各格首段同高、末尾文字完整可见',
+    !!row2 && row2.segCount >= 2 && row2.allText.includes('用来把列宽撑到远超视口')
+    && row2.firstSegTops.length === 3 && row2.firstSegTops.every((t) => t === row2.firstSegTops[0]),
+    JSON.stringify(row2));
 
   await page.context().close();
 }
