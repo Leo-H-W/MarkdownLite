@@ -85,20 +85,23 @@ npm start
 MarkdownLite/
 ├── server.js          # Express 静态服务 + 守护进程 + REST API
 ├── package.json
+├── .gitattributes     # 禁止对 public/vendor/ 做行尾转换（保证字节与上游一致）
 ├── public/
-│   ├── index.html     # 页面结构
+│   ├── index.html     # 页面结构（三方库一律由本地 vendor/ 引入，见文件顶部说明）
 │   ├── app.js         # 前端交互逻辑（含现代模式的即时渲染）
 │   ├── md-render.js   # Markdown 渲染预处理（前后端共用，UMD）
-│   └── style.css      # 自定义样式（含 .live-preview 现代模式规则）
+│   ├── style.css      # 自定义样式（含 .live-preview 现代模式规则）
+│   └── vendor/        # 三方库本地副本（CodeMirror / Mermaid / marked / github-markdown-css）
+│                      # 随包发布，离线机器上也能用；升级方式见 index.html 顶部注释
 ├── checklist.md       # 验收清单：现代模式表格 / 自动保存（逐条记录期望效果）
 ├── scripts/
 │   ├── set-windows-gui.js     # 打包后改写 exe 的 PE 子系统为 GUI
 │   ├── checklist-check.mjs    # 按 checklist.md 校验表格各项（需本机有 playwright）
 │   ├── autosave-check.mjs     # 校验自动保存开关与时机（同上）
 │   ├── table-menu-check.mjs   # 校验表头「…」→ 删除表格，及表格块边界判定（同上）
-│   ├── edit-modern-check.mjs    # 校验「文件列表点文件 → 点正文即可编辑」主链路，及默认现代模式 / 传统浏览态两个契约（同上）
-│   ├── repro-table-modern.mjs   # 复现脚本：传统 / 现代两种模式下表格渲染对比（传统正常、现代曾显示不对）
-│   └── repro-switch-folder.mjs  # 复现脚本：现代模式下更换文件夹后仍可编辑（6 个场景）
+│   ├── edit-modern-check.mjs  # 校验「文件列表点文件 → 点正文即可编辑」主链路，及默认现代模式 / 传统浏览态两个契约（同上）
+│   ├── offline-check.mjs      # 断网验收：abort 掉一切非 localhost 请求，验证三方库已完全本地化（同上）
+│   └── test-server.mjs        # 从磁盘伺服 public/ 到 3459，供上面几个 check 脚本连接（避开 exe 快照里代码版本不可控的坑）
 ├── start.bat / stop.bat     # Windows 启动 / 停止脚本
 ├── start.sh  / stop.sh      # Linux / macOS 启动 / 停止脚本
 ├── doc/               # 知识库文档
