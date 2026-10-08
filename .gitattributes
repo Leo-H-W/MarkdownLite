@@ -1,0 +1,5 @@
+# public/vendor/ 下是上游 min 产物的原样副本（见 public/index.html 顶部说明）。
+# 本仓库 core.autocrlf=true，不加下面这条的话，Windows 上 checkout 出的工作副本
+# 会被写成 CRLF —— 运行不受影响，但仓库里"字节与上游一致、可用 sha256 比对"这个
+# 性质就没了。禁用行尾转换后，checkout 出来的就是 blob 里的原始字节。
+public/vendor/** -text
