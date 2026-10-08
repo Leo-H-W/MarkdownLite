@@ -371,6 +371,24 @@
       .replace(/"/g, '&quot;');
   }
 
+  // 客户端渲染的唯一入口：marked / MdRender 至少要在这里挡住。
+  // 它们由 index.html 从 vendor/ 引入，理论上一定在；一旦缺了（vendor 被删、被改名、
+  // 打包漏掉资源），MdRender.renderMarkdown 里那句 marked.parse(...) 会直接抛
+  // "Cannot read properties of undefined (reading 'parse')" —— 用户只看到白屏和一句
+  // 看不懂的报错。这里退化成纯文本 + 明说原因，至少内容还在、问题可定位。
+  // 不改 md-render.js 的原因是它浏览器/服务端双用（server.js 也 require 它），
+  // 服务端语义是"传给我 marked 我就渲染"，静默吞掉缺参反而会掩盖服务端的问题。
+  function renderMarkdownHtml(md) {
+    if (!window.marked || !window.MdRender) {
+      console.warn('Markdown 渲染库未加载：window.marked =', window.marked,
+        ' window.MdRender =', window.MdRender, '（检查 index.html 引用的 vendor/ 资源是否齐全）');
+      return '<div class="empty-state"><p>Markdown 渲染库（marked）未加载，当前以纯文本显示。'
+        + '请检查 index.html 引用的 vendor/ 资源是否齐全。</p></div>'
+        + '<pre>' + escapeHtml(md) + '</pre>';
+    }
+    return window.MdRender.renderMarkdown(md, window.marked);
+  }
+
   function slugify(text) {
     return text
       .toLowerCase()
@@ -612,17 +630,56 @@
   // 而「光标在表头/分隔行时展开分隔行」的功能又会在光标移到它上一行时把它露出来，
   // 于是表现为「点倒数第二行才多出一行 | | | |」。
   const TABLE_SEP_RE = /^\s*\|(?:\s*:?-{3,}:?\s*\|)+\s*$/;
+  // 逻辑行的起点：以 | 开头即可，不要求以 | 收尾 —— 未封死的单元格会跨行
+  //（多行表格行，续行不以 | 开头，见 tableDataEnd / lineFragments）。
+  const TABLE_ROW_START_RE = /^\s*\|/;
   const TABLE_COL_CLASS_PREFIX = 'cm-tbl-c';
   // 单列最大宽度（em）。一个格子里塞整段文字时（竞品分析、长描述列），
   // 不封顶会把列宽撑到几百 em：格子在编辑器里一行放不下，inline-block 挨个换行，
   // 整表竖着摞 —— 一张表带坏全文档（D:/temp/daily_delete/test.md 实测）。
   // 超出的内容在现代模式视图里被裁剪（CSS overflow:hidden），源文本不受影响。
   const TABLE_MAX_COL_EM = 40;
-  // 单列可读宽度的下限（em，含内边距与边框）。列很多的宽表（实测 16 列的质量改进表）
-  // 即使按视口压窄，每列也只分得到 3~4em —— 一列只剩两三个字的碎片排版，
-  // 比源码还难读。这类表整段不渲染成表格，保持源码形态（跟传统模式对照着看）。
+  // 单列宽度的下限（em，含内边距与边框）。早期取 6em：16 列的质量改进表压窄后
+  // 每列只剩 3~4em，当时判定「碎片排版比源码还难读」而整段降级为源码。
+  // 实际使用反馈相反：同一张表传统模式（HTML 表格自动换行）能看、现代模式
+  // 摊成一整段管道符源码才是「显示不对」。压窄后的格子走自适应换行（内容全保留、
+  // 只是行变高），观感与传统模式一致，所以下限放低；换行预算有下限兜底
+  //（标准表 4 个半角单位 ≈2 个汉字，紧凑表 2 个 ≈1 个），列再窄也不会更碎。
+  // 下限不取消是为了挡住病态表（二三十列）：连两三个字都放不下的列宽，
+  // 才整段不渲染、保持源码形态。
   // 判定：可用宽度平分给每列后仍达不到这个宽度，就放弃渲染。
-  const TABLE_MIN_COL_EM = 6;
+  const TABLE_MIN_COL_EM = 2.5;
+  // 「紧凑表」：标准几何里每列有 18px 固定开销（padding 16 + border 2），
+  // 十几列的宽表光开销就吃掉约 1/4 宽度，等比压窄还会把「序号」这类天然窄列
+  // 压到内容盒不足一个汉字宽（16px 字 + 18px 开销 > 列宽），一个字都显示不全。
+  // 平均列宽低于 TABLE_COMPACT_AVG_EM 时按紧凑表处理：内边距收到 2px
+  //（CSS 的 .cm-tbl-compact），压窄时每列再给一个「一个汉字 + 开销」的下限。
+  const TABLE_COMPACT_AVG_EM = 6;
+  // 每列固定占位（左右内边距 + 左右边框），必须与实际 CSS 一致 ——
+  // 它同时用于「宽度折算成内容盒预算」和「压窄时算整表占位」，算小了盒子就溢出。
+  // 标准表 12+12 内边距 + 2 边框 = 26px（见 style.css 的 .cm-tbl-cell：
+  // 横向取 12px 而不是传统 td 的 13px，是为了让内容盒与传统等宽又留 1px 余量）；
+  // 紧凑表 2+2 + 2 = 6px（.cm-tbl-cell.cm-tbl-compact 把左右内边距收到 2px）。
+  const TABLE_PAD_PX_STD = 26;
+  const TABLE_PAD_PX_COMPACT = 6;
+  // 内容盒预算折算用的固定占位。26px 是本表格子真实的横向内边距 + 边框，
+  // 但传统表格是 border-collapse，单元格矩形只算共享边框的一半 ——
+  // 它的内容盒实际比「矩形宽 − 26px」还宽 1px。按 27px 折算才能让断行点
+  // 与传统逐格一致（竞争分析表实测：按 26px 每列会多折一行、整行高出 24px）；
+  // 同时预算比真实内容盒小 1px，天然留出亚像素余量、不会溢出裁字。
+  const TABLE_PAD_EM_STD = 1.6875;     // 27px @16px 字号
+  const TABLE_PAD_EM_COMPACT = 0.5;    // 6px 开销（@16px = 0.375em）+ 2px 余量：
+                                       // 编辑器实为比例字体，ASCII 均宽大于 0.5em，
+                                       // 不留余量 ASCII 段会溢出 1~2px 变省略号
+  // 字符估算列宽时的额外余量（em）：估宽是「半角单位 × 0.5em」的近似，ASCII 偏窄，
+  // 一点余量都不留会让估出来的列宽刚好等于文字宽、被 text-overflow 裁掉。
+  // 浏览器实测的路径不需要它 —— 那边的列宽是精确值，余量会让折行点提前。
+  const TABLE_WIDTH_SLACK_EM = 0.28;
+  // 比例压窄的下限（em，含内边距与边框）：自然宽低于它的列压窄时保持自然宽，
+  // 保住「问题来源」「序号」这类短列的完整显示（问题来源 = 4 全角字 + 余量
+  // 正好 4.5em，再低表头就要折行）；长文列的压缩量按（自然宽 - 下限）的
+  // 比例分配，列宽随内容长短走。
+  const TABLE_FLOOR_COL_EM = 4.5;
   // 每张表一个稳定 id，列宽样式按 id 生成（见 refreshTableMarks）。
   // 不能用块序号：复用标注时序号会漂移，旧 markText 上的类名会对不上新规则。
   let tableIdSeq = 0;
@@ -632,12 +689,63 @@
   let tblSegRulesMax = 1;
   // 单元格内的换行标记（Ctrl+Enter 插入，或作者手写）。兼容 <br> / <br/> / <br />
   const TABLE_BR_RE = /<br\s*\/?>/gi;
+  // 用浏览器自己量列宽：把表格块源码交给与传统预览同一套渲染
+  // （MdRender.renderMarkdown + github-markdown-css 的 .markdown-body），
+  // 藏到视口外按传统容器的宽度摆一次，读回每列宽 —— 现代模式的列宽分布
+  // 与传统模式浏览效果严格一致（用户要求「和现代传统一样」）。量不出
+  // （渲染失败/零宽）返回 null，调用方退回字符估算。
+  let tblMeasureProbe = null;
+  function measureTableWidths(blockMd, availPx) {
+    try {
+      if (!window.MdRender || !window.marked) return null;
+      const html = window.MdRender.renderMarkdown(blockMd, window.marked);
+      const m = html.match(/<table[\s\S]*?<\/table>/i);
+      if (!m) return null;
+      if (!tblMeasureProbe) {
+        tblMeasureProbe = document.createElement('div');
+        tblMeasureProbe.className = 'markdown-body';
+        tblMeasureProbe.setAttribute('aria-hidden', 'true');
+        // padding:0 —— .markdown-body 自带 40px×2 内边距，会吃掉探针的可用宽
+        // （实测 1560 的探针装出 1480 的表，差的正好 80px），量宽时清零。
+        tblMeasureProbe.style.cssText =
+          'position:absolute;left:-99999px;top:0;visibility:hidden;padding:0;';
+        document.body.appendChild(tblMeasureProbe);
+      }
+      tblMeasureProbe.style.width = Math.max(200, Math.round(availPx)) + 'px';
+      tblMeasureProbe.innerHTML = m[0];
+      const table = tblMeasureProbe.querySelector('table');
+      if (!table) return null;
+      // 列宽按列统一，取单元格数最多的一行读（防御合并差列）
+      let best = [];
+      for (const tr of table.querySelectorAll('tr')) {
+        const cells = tr.children;
+        if (cells.length > best.length) best = cells;
+      }
+      const widths = [...best].map((c) => c.getBoundingClientRect().width);
+      tblMeasureProbe.innerHTML = '';
+      if (!widths.length || widths.some((w) => !(w > 0))) return null;
+      return widths;
+    } catch (e) {
+      return null;
+    }
+  }
+
   // 每个表格块一份记录，便于「只重建变化的那张表」而不是全文推倒重来。
   // { sig, marks: [], sepHandle }
   //   sig       —— 该块的内容签名（只含文本，不含行号：插入/删除行会让行号漂移，
   //                带上行号会导致没改过的表也被判定为变化）
   //   sepHandle —— 分隔行的行句柄。用句柄而不是行号，编辑后仍然指向正确的行。
   let tableBlocks = [];
+
+  // 被上移到逻辑行行首的「尾部格子」注册表（J5.png：数据基座/P1 写在逻辑行
+  // 最后一行，渲染在整行最底部、与行首各列内容不在同一高度）。格子文本被
+  // margin-top 上移后，CodeMirror 按 y 带反推行号的 coordsChar 会把点击映射到
+  // 错误的行 —— 登记表单 + mousedown 拦截（bindLiftedCellClicks）按字符实测
+  // 坐标换算回正确的文档位置。
+  let liftedCells = [];
+  // 尾部格子的按格动态规则（margin-top 上移量 + 末段伸到行底的高度），
+  // 标注意外收集、refreshTableMarks 末尾与列几何规则一起写入样式表。
+  let pendingLiftRules = [];
 
   function dropTableBlock(b) {
     for (const m of b.marks) m.clear();
@@ -680,6 +788,8 @@
   function clearTableMarks() {
     for (const b of tableBlocks) dropTableBlock(b);
     tableBlocks = [];
+    liftedCells = [];
+    pendingLiftRules = [];
     // 清掉整体签名，避免下次因为「签名没变」跳过重建、留下已被清空的标注
     lastTableSignature = '';
     clearActiveTableRow();   // 「…」按钮的高亮状态（离开现代模式时也要收掉）
@@ -703,42 +813,178 @@
     return parts.join('\n');
   }
 
-  // 列宽折算成「半角单位预算」：宽度公式是 units*0.5 + 1.4em，反推即可。
-  // 不能留余量 —— 列宽本来就是按「最长一段 + 1.4em」算的，定义列宽的那段
-  // 必须恰好放得下，否则它会被自己的列宽折行（checklist C5 实测踩过）。
-  // 0.01 的 epsilon 只对浮点误差，不对内容。
-  function wrapBudgetUnits(b, p) {
-    return Math.max(4, (b.colWidthEm[p] - 1.4) * 2 + 0.01);
+  // 列宽折算成「内容盒像素预算」：内容盒宽 = (列宽 em - 固定 padEm) × fontPx。
+  // 不能留余量 —— 列宽本来就是按「最长一段 + padEm」算的，定义列宽的那段
+  // 必须恰好放得下（checklist C5 实测踩过），所以预算外只给 1px 的测量容差。
+  // 预算下限一个全角字宽（标准表与紧凑表一样）：被压窄到不足两个汉字的列，
+  // 若按 2 字下限切，段会比内容盒宽、直接溢出被裁成省略号（7 列竞争分析表
+  // 的「优先级」表头实测）；按 1 字/段折行内容全保留，与传统模式的窄列一致。
+  function wrapBudgetPx(b, p, fontPx) {
+    const padEm = b.compact ? TABLE_PAD_EM_COMPACT : TABLE_PAD_EM_STD;
+    const budget = (b.colWidthEm[p] - padEm) * fontPx;
+    return Math.max(fontPx, budget);
   }
 
-  // 把一段文字按预算折成多段（自适应换行）：全角记 2、ASCII 记 1，
-  // 与 visualWidth / 列宽公式同一套单位。拆不开（预算够、或一个字就超预算）时
+  // 实测文字宽度（px）：列宽/换行估算用的是「半角单位」（ASCII = 0.5em），
+  // 但编辑器实为比例字体，ASCII 均宽偏大，按单位折算的预算对中英混排的段
+  // 会估宽几个像素 —— 段尾被裁成省略号（test.md 多行表格的续行实测）。
+  // 换行一律用 canvas 按编辑器字体实测：表头取粗体（表头与数据共用列宽，
+  // 从严估宽不估窄）。canvas 不可用时退回单位估算。
+  //
+  // 字重必须与真正渲染的一致，否则量出来的宽度对不上：表头是 600
+  //（.cm-tbl-head 的 font-weight，对齐传统视图的 <th>），不是编辑器的 700 ——
+  // 差 1 个字重就多 3px，刚好卡满的格子会被误判成折行（实测「Beta 目标（建议值，
+  // DCP2-2 校准）」：700 量出 259.06px，而列内容盒只有 256px）。
+  const TABLE_HEAD_WEIGHT = 600;
+  let tblMeasureCanvas = null;
+  function makeMeasurePx(fontPx, bold) {
+    try {
+      if (!tblMeasureCanvas) tblMeasureCanvas = document.createElement("canvas");
+      const ctx = tblMeasureCanvas.getContext("2d");
+      const cs = getComputedStyle(cmEditor.getWrapperElement());
+      ctx.font = (bold ? TABLE_HEAD_WEIGHT + " " : "400 ") + fontPx + "px " + cs.fontFamily;
+      return (str) => ctx.measureText(str).width;
+    } catch (e) {
+      return (str) => visualWidth(str) * fontPx * 0.5;
+    }
+  }
+
+  // 把一段文字按像素预算折成多段（自适应换行）：宽度用 measurePx 逐字实测，
+  // 与列的内容盒同一坐标系。拆不开（整段放得下、或一个字就超预算）时
   // 返回 null，调用方保留原单段。返回 { pieces, brs: [] }，pieces 首尾相接
   // 覆盖原区间 —— 虚拟段之间没有 <br> 字面量，光标的落点由 markText 区间保证。
-  function wrapPieceByBudget(text, piece, budget) {
+  // 不能出现在行首的收尾标点（CJK 禁则）：断行落在它们前面时，把前一个字
+  // 一起带到下一行 —— 与传统换行一致，也不会出现「上一行 …14.27 / 下一行 %」。
+  const NO_LINE_START = '%)）】。，、；：！？!?’”」』》〉';
+  // 不能出现在行尾的开括号（同样是与传统换行对齐的一部分：浏览器会把
+  // 「…（」的括号挤到下一行，逐字折行不补这条就会少折一行）。
+  const NO_LINE_END = '（【《“‘(「『〈';
+  // 直引号是「两可」标点：跟在空格/行首后面当开引号（不能落在行尾），
+  // 跟在中日韩字或字母数字后面当闭引号（不能落在行首）。浏览器的断行
+  // 就是这么判的，不区分会让满篇 「…"xxx"…」 的长格少折一行。
+  const AMBIG_QUOTE = "\"'";  // 直双引号与直单引号
+  const JUDGE_TAIL = /[\s，。、；：！？）】》”’]/;
+  function isOpenQuoteAt(text, i) {
+    if (!AMBIG_QUOTE.includes(text[i])) return false;
+    return i === 0 || JUDGE_TAIL.test(text[i - 1]);
+  }
+  function isCloseQuoteAt(text, i) {
+    if (!AMBIG_QUOTE.includes(text[i])) return false;
+    return i > 0 && !JUDGE_TAIL.test(text[i - 1]);
+  }
+  const ASCII_WORD_CH = /[A-Za-z0-9]/;
+  // 两个字之间能不能断行。浏览器不在 ASCII 单词中间断（iMaster / NCE-Campus
+  // 都整词换行），逐字折行必须跟着这条走：不跟的话每行能多塞几个字母，
+  // 整格少折一行、行高就比传统矮一截（竞争分析表的友商列实测差 1 行）。
+  function canBreakBefore(prev, next) {
+    if (next === undefined) return true;
+    if (next === ' ') return true;                       // 空格前断，空格并回上一段
+    return !(ASCII_WORD_CH.test(prev) && ASCII_WORD_CH.test(next));
+  }
+  function wrapPieceByBudget(text, piece, budgetPx, measurePx) {
+    // 行首/行尾的空格浏览器会折叠掉、不占宽度，而单元格区间是「两根管道符之间」、
+    // 含管道符两侧的空格。量宽前先裁掉，否则每格白算约 9px，把本来就放得下的段
+    // 误判成折行、平白多折一行（test.md「Beta 目标（建议值，DCP2-2 校准）」表头实测：
+    // 传统模式一行、现代模式两行，行高差 37px）。
+    let mFrom = piece.from, mTo = piece.to;
+    while (mFrom < mTo && (text[mFrom] === " " || text[mFrom] === "\t")) mFrom++;
+    while (mTo > mFrom && (text[mTo - 1] === " " || text[mTo - 1] === "\t")) mTo--;
+    if (mFrom >= mTo) return null;                     // 全空格格：交给原有的空格子逻辑
+    // 整段先量一次：放得下就直接返回，不必逐字走（也是大多数格子的路径）
+    if (measurePx(text.slice(mFrom, mTo)) <= budgetPx + 1) return null;
+    // 收尾标点（%）】。，；等）不能折行后独占一行（「工单占比14.27 / %」实测）：
+    // 量出尾部标点串的宽度，中间段按「预算 - 标点宽」断行，把它们挤回末段末尾。
+    // 只在标点串本身放得下时启用，病态窄列退回原预算、行为不变。
     const pieces = [];
-    let units = 0, start = piece.from;
-    let i = piece.from;
-    while (i < piece.to) {
+    let px = 0, start = piece.from;
+    let i = mFrom;
+    while (i < mTo) {
       const cp = text.codePointAt(i);
-      const u = cp > 0x2e7f ? 2 : 1;
-      if (units + u > budget && units > 0) {
-        pieces.push({ from: start, to: i });
-        start = i;
-        units = 0;
+      const ch = String.fromCodePoint(cp);
+      // 行首空格浏览器折叠掉，不占宽度 —— 不跳过的话首段被高估、提前折行
+      const w = (px === 0 && (ch === " " || ch === "\t")) ? 0 : measurePx(ch);
+      if (px + w > budgetPx && px > 0) {
+        // 禁则：断点后第一个字不能是收尾标点（% ）】。，等），否则它会独占
+        // 一行的开头（「工单占比14.27 / %」实测）。与传统换行的处理一致：
+        // 把前一个字一起带到下一行，而不是缩窄整段的预算 —— 缩预算会让
+        // 每一行都少放一个字，整格平白多折一行（竞争分析表实测每列多 1 行）。
+        let cut = i;
+        while (cut > start && !canBreakBefore(text[cut - 1], text[cut])) cut--;
+        if (cut === start) cut = i;          // 整个词都放不下（超长单词）：硬断
+        // 行尾禁则：开括号/开引号不能落在行尾，把它们挤到下一行去
+        while (cut > start + 1 && (NO_LINE_END.includes(text[cut - 1])
+               || isOpenQuoteAt(text, cut - 1))) cut -= 1;
+        // 行首禁则：收尾标点/闭引号不能落在行首，把前一个字一起带下去
+        while (cut > start + 1 && (NO_LINE_START.includes(text[cut])
+               || isCloseQuoteAt(text, cut))) cut -= 1;
+        pieces.push({ from: start, to: cut });
+        start = cut;
+        px = 0;
+        i = cut;
         continue;
       }
-      units += u;
+      px += w;
       i += cp > 0xffff ? 2 : 1;
     }
     pieces.push({ from: start, to: piece.to });
     if (pieces.length < 2) return null;
-    return { pieces, brs: [] };
+    // 断点若恰好在空格前，新段会以空格开头；空格不承载信息，并回上一段末尾，
+    // 否则窄列里「空格自己占一段」、格子内容整体错下去一行（紧凑表实测）。
+    // 只并段首的空格；段 0 的段首空格由调用方处理（紧凑表折叠进管道符）。
+    const merged = [pieces[0]];
+    for (let k = 1; k < pieces.length; k++) {
+      let { from, to } = pieces[k];
+      while (from < to && text[from] === " ") { merged[merged.length - 1].to++; from++; }
+      if (from < to) merged.push({ from, to });   // 全空格段：整段并进上一段
+    }
+    if (merged.length < 2) return null;
+    return { pieces: merged, brs: [] };
   }
 
-  function visualWidth(s) {
+  // 折行结果缓存：跨行逻辑行要先扫一遍整行、数出每列的行数（见 refreshTableMarks
+  // 的预扫），正式标注时同一段还要再折一次。按「行号 + 区间 + 预算」缓存，
+  // 两次扫描只折一遍 —— 折行是逐字 canvas 实测，是这条路径上最贵的一步。
+  // 每次重建开始时清空（clearTableMarks / 重建入口），内容变了不会取到旧结果。
+  let wrapCache = null;
+  function wrapCached(lineNo, piece, budgetPx, measurePx, text) {
+    if (!wrapCache) wrapCache = new Map();
+    const key = lineNo + ':' + piece.from + ':' + piece.to + ':' + Math.round(budgetPx);
+    const hit = wrapCache.get(key);
+    if (hit !== undefined) return hit;
+    const r = wrapPieceByBudget(text, piece, budgetPx, measurePx);
+    wrapCache.set(key, r);
+    return r;
+  }
+
+  // ASCII 的「半角单位」实测权重（只用于紧凑表）。编辑器实际是 16px 比例
+  // 字体（sans），ASCII 均宽明显大于 0.5em（粗体表头更甚），按 1 个单位
+  //（=0.5em）估算会把列宽与换行预算都算窄，ASCII 多的段被裁成省略号
+  //（「workaround」表头、「从NAC拆出NMC」数据行实测）。首次用到时用 canvas
+  // 按编辑器字体实测（取粗体 —— 表头与数据共用列宽，从严估宽不估窄），
+  // 量不到就保持 1。标准表沿用旧的固定权重（1），几何与既有版本一致。
+  let latinUnitWeight = 1;
+  let latinUnitMeasured = false;
+
+  function latinWeight() {
+    if (latinUnitMeasured) return latinUnitWeight;
+    latinUnitMeasured = true;
+    try {
+      const probe = (cmEditor && cmEditor.getWrapperElement()) || document.body;
+      const cs = getComputedStyle(probe);
+      const ctx = document.createElement("canvas").getContext("2d");
+      ctx.font = "700 " + cs.fontSize + " " + cs.fontFamily;
+      const sample = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+      const px = ctx.measureText(sample).width / sample.length;
+      const em = parseFloat(cs.fontSize) || 16;
+      if (px > 0) latinUnitWeight = px / (em * 0.5);
+    } catch (e) { /* 量不到就保持 1（旧的估算行为） */ }
+    return latinUnitWeight;
+  }
+
+  function visualWidth(s, latinW) {
+    const lw = latinW === undefined ? 1 : latinW;
     let n = 0;
-    for (const ch of s) n += ch.codePointAt(0) > 0x2e7f ? 2 : 1;
+    for (const ch of s) n += ch.codePointAt(0) > 0x2e7f ? 2 : lw;
     return n;
   }
 
@@ -749,6 +995,37 @@
       if (text[i] === '|' && text[i - 1] !== '\\') out.push(i);
     }
     return out;
+  }
+
+  // 一行在表格里的单元格片段：[{ col, from, to, pipeAfter }]。
+  // startCol：本行第一个片段所属的列 —— 以 | 开头的行从 0 起；续行（不以 | 开头）
+  // 从「上面递下来的开口列」起（多行表格行里，第一个片段是上行末格的延续）。
+  // pipeAfter：收住这个片段的那根管道符的位置（没有 = -1），空格子标记要借它占位。
+  function lineFragments(text, startCol) {
+    const frags = [];
+    const pipes = pipePositions(text);
+    const end = text.replace(/\s+$/, "").length;
+    const terminated = end > 0 && text[end - 1] === "|" && text[end - 2] !== "\\";
+    if (TABLE_ROW_START_RE.test(text)) {
+      for (let k = 0; k + 1 < pipes.length; k++) {
+        frags.push({ col: k, from: pipes[k] + 1, to: pipes[k + 1], pipeAfter: pipes[k + 1] });
+      }
+      // 未封死的尾格：最后一根管道符之后还有内容（多行表格行的开口格）
+      if (!terminated && pipes.length && pipes[pipes.length - 1] + 1 <= text.length) {
+        frags.push({ col: pipes.length - 1, from: pipes[pipes.length - 1] + 1, to: text.length, pipeAfter: -1 });
+      }
+    } else if (pipes.length) {
+      frags.push({ col: startCol, from: 0, to: pipes[0], pipeAfter: pipes[0] });
+      for (let k = 0; k + 1 < pipes.length; k++) {
+        frags.push({ col: startCol + k + 1, from: pipes[k] + 1, to: pipes[k + 1], pipeAfter: pipes[k + 1] });
+      }
+      if (!terminated && pipes[pipes.length - 1] + 1 <= text.length) {
+        frags.push({ col: startCol + pipes.length, from: pipes[pipes.length - 1] + 1, to: text.length, pipeAfter: -1 });
+      }
+    } else {
+      frags.push({ col: startCol, from: 0, to: text.length, pipeAfter: -1 });
+    }
+    return frags;
   }
 
   // 标记出落在代码围栏内的行。围栏里的内容原样展示，不该被当成表格渲染 ——
@@ -769,9 +1046,9 @@
 
   // 单元格的类名：tid 定位列宽规则（每张表一套），cm-tbl-c<p> 只作列号钩子
   //（测试与负外边距选择器 :not(.cm-tbl-c0) 在用，本身不再带任何样式）
-  function cellClass(p, head, tid) {
+  function cellClass(p, head, tid, compact) {
     return 'cm-tbl-cell cm-tbl-t' + tid + '-c' + p + ' ' + TABLE_COL_CLASS_PREFIX + p
-      + (head ? ' cm-tbl-head' : '');
+      + (head ? ' cm-tbl-head' : '') + (compact ? ' cm-tbl-compact' : '');
   }
 
   // 把单元格按 <br> 切成若干段 —— 一格里的一个「段」就是渲染后的一行。
@@ -803,45 +1080,209 @@
   //   .cm-tbl-c<p>      列的 left / width
   //   .cm-tbl-seg<k>    第 k 段的 top
   //   .cm-tbl-mline<k>  整行高度（盒子都不占位，行高只能自己定）
-  function markMultilineRow(b, n, cells, segs) {
+  function markMultilineRow(b, n, cells, segs, rowTop, rowBottom, multiLineRow, rowL) {
     const head = n === b.from;
     const handle = cmEditor.getLineHandle(n);
-    for (const cls of ['cm-tbl-mline', 'cm-tbl-mline' + segs]) {
+    // 整行 13px 的上下非内容高度（vpad）只属于逻辑行最外两条边：
+    // 行首物理行分到 vpad/2、行尾物理行分到 vpad/2，中间物理行一点都不分。
+    // 不分的话每个物理行都加一份 vpad，跨 N 行的逻辑行会高出 (N−1)×13px。
+    // 跨行逻辑行的行高另算（整行高按 L 段平分给各物理行，见 refreshTableMarks
+    // 末尾生成的 .cm-tbl-tl<id> 规则），所以这里不给 cm-tbl-mline<段数>——
+    // 给了会被那条按段数定高的规则接管、整行被撑高。
+    const lineCls = ['cm-tbl-mline'];
+    if (!multiLineRow) lineCls.push('cm-tbl-mline' + segs);
+    if (rowTop) lineCls.push('cm-tbl-mtop');
+    if (rowBottom) lineCls.push('cm-tbl-mbot');
+    if (multiLineRow) {
+      const u = (b.tlSeq = (b.tlSeq || 0) + 1);
+      lineCls.push('cm-tbl-tl' + b.tid + '-' + u);
+      if (rowTop) {
+        b.curRowGeom = { r0: n, r1: n, rowL, colLines: b.curRowColLines,
+          colStarts: b.curRowColStarts, lines: [] };
+        (b.rowGeoms = b.rowGeoms || []).push(b.curRowGeom);
+      }
+      const g = b.curRowGeom;
+      if (g) {
+        if (rowBottom) g.r1 = n;
+        g.lines.push({ u, n });
+      }
+    }
+    for (const cls of lineCls) {
       cmEditor.addLineClass(handle, 'text', cls);
       b.rowClasses.push([handle, cls]);
     }
     for (const c of cells) {
       const last = c.pieces.length - 1;
-      const base = cellClass(c.p, head, b.tid) + ' cm-tbl-abs';
+      const base = cellClass(c.p, head, b.tid, b.compact) + ' cm-tbl-abs';
+      // 尾部格子上移（J5.png）：整格 margin-top 上移 c.liftVal 行，内容从逻辑行
+      // 行顶开始，与行首各列对齐。顶边框由行首物理行的填充盒画；底边框在本格
+      // 末段（仅行尾物理行），末段高度用按格规则伸到行底。格子登记进
+      // liftedCells —— 文本被上移后 CodeMirror 按 y 带反推行号会选错行，
+      // 点击换算靠 bindLiftedCellClicks 用 charCoords 实测坐标二分。
+      // 垂直居中（对齐传统 td 的 vertical-align: middle）：传统表格里同一行的
+      // 每个 td 都撑满整行，内容块在行高里居中；n 段内容在 L 段高的行里，
+      // 首行落在「(L − n)/2 个行距」之下。只有单物理行逻辑行需要在这里补 ——
+      // 单段格走 .cm-tbl-full 的 flex 居中、上移格走 .cm-tbl-vmid 的通高居中，
+      // 两套自己已经居中了，再叠一份会双倍偏移；跨行逻辑行整行高与行顶
+      // 都要另算，由 multiLineRow 那套处理。
+      // 居中下移量：本格 n 行、整行 L 行 → 内容整体下移 (L − n)/2 个行距，
+      // 对齐传统 td 的 vertical-align: middle。单段格不设 —— 它走通高 +
+      // flex 居中（cm-tbl-full），两套叠加会双倍偏移。
+      // ⚠️ 这里必须用「整格跨所有物理行的总行数」，不能用 c.pieces.length ——
+      // 那是**本物理行上这一片段**折出来的段数。跨行逻辑行里一个格子可能
+      // 在第一行折 3 段、后面几行各 1 段，按片段算会把居中量放大好几倍
+      //（竞争分析表实测：col2 整格 18 行、首行片段 3 段，居中量被算成 15 行 = 180px）。
+      const colLines = (multiLineRow && b.curRowGeom && b.curRowGeom.colLines) || null;
+      const cellLines = (colLines && colLines[c.p]) ? colLines[c.p] : c.pieces.length;
+      // 段号必须跨物理行连续：一个格子跨 3 行时，第 2 行的首段是整格的第 4 段，
+      // 段号从 0 重新数的话它会落到整行行顶、和前一行叠在一起
+      //（竞争分析表实测：col2 各行的首段都跑回行顶）。
+      const colStarts = (multiLineRow && b.curRowGeom && b.curRowGeom.colStarts) || null;
+      const pieceBase = (colStarts && colStarts[n] && colStarts[n][c.p]) || 0;
+      let cshCls = '';
+      const cshLines = Math.max(0, rowL - cellLines);
+      if (cellLines > 1 && cshLines > 0) {
+        const u = (b.cshSeq = (b.cshSeq || 0) + 1);
+        cshCls = ' cm-tbl-t' + b.tid + '-csh' + u;
+        pendingLiftRules.push('.live-preview .CodeMirror-line .cm-tbl-cell.' + cshCls.trim() +
+          '{--lmd-c:calc(var(--cm-tbl-lineh) / 2 * ' + cshLines + ')}');
+      }
+      // 单段格：盒子要通到逻辑行行底。跨行逻辑行的行高不等于本行高度
+      // （整行高按 L 段算、还摊给多个物理行），height:100% 撑不满，
+      // 所以按格给一个绝对值 vpad + L×行距。
+      if (cellLines === 1 && multiLineRow) {
+        const u = (b.fullSeq = (b.fullSeq || 0) + 1);
+        cshCls += ' cm-tbl-t' + b.tid + '-full' + u;
+        pendingLiftRules.push('.live-preview .CodeMirror-line ' +
+          '.cm-tbl-cell.cm-tbl-abs.cm-tbl-top.cm-tbl-bottom.cm-tbl-full.cm-tbl-t' +
+          b.tid + '-full' + u +
+          '{height:calc(var(--cm-tbl-vpad) + ' + rowL + ' * var(--cm-tbl-lineh))}');
+      }
+      // 跨行逻辑行里，格子的段顶按「行首内边距 + 居中下移 + 段序号×行距」算，
+      // 与实际写在哪个物理行无关 —— 于是 CodeMirror 按 y 带反推的行号会和
+      // 光标真正该在的行对不上，登记进 liftedCells 由 bindLiftedCellClicks
+      // 用 charCoords 实测坐标换算回来。
+      let liftCls = '', liftEntry = null;
+      if (multiLineRow) {
+        const u = (b.liftSeq = (b.liftSeq || 0) + 1);
+        liftCls = ' cm-tbl-t' + b.tid + '-lift' + u;
+        liftEntry = { cls: 'cm-tbl-t' + b.tid + '-lift' + u, marks: [] };
+        liftedCells.push(liftEntry);
+      }
       const used = new Set();     // 已被空段占用的 <br>：一个 <br> 只能顶一行
       c.pieces.forEach((piece, k) => {
-        const cls = base + ' cm-tbl-seg' + k
-          + (k === 0 ? ' cm-tbl-top' : '')
-          + (k === last ? ' cm-tbl-bottom' : '')
-          + (last === 0 ? ' cm-tbl-full' : '');   // 只有一段：撑满整行
+        // 最后一段拉到行底（cm-tbl-lasth<k>）：否则一格折 7 行、旁边格折 11 行时，
+        // 矮格的底边框悬在半空，整行的竖线断成几截（J2.png 质量改进表实测）。
+        // 单段的格子由 cm-tbl-full 撑满整行，不用拉。
+        // 顶/底边框属于「逻辑行」而不是物理行：每个格子都从行顶罩到行底
+        //（传统表格的每个 td 也是这样），所以每格的第 0 段画顶边框、
+        // 末段画底边框，与它写在哪个物理行无关。
+        // 顶/底边框认的是**整格**的首段/末段，不是本行片段的首末段：
+        // 一个格子跨 3 个物理行时，每行片段的首段都按「首段」处理的话，
+        // 每行都会画一条顶边框、盒子也从本行行顶起算（竞争分析表实测：
+        // 后两行的内容全跑回行顶、与前一行叠在一起）。
+        const gk = pieceBase + k;      // 段在整格里的序号
+        let cls = base + ' cm-tbl-seg' + gk + liftCls + cshCls;
+        if (gk === 0) cls += ' cm-tbl-top';
+        if (gk === cellLines - 1) cls += ' cm-tbl-bottom' + (gk > 0 ? ' cm-tbl-lasth' + gk : '');
+        if (cellLines === 1) cls += ' cm-tbl-full';   // 只有一段：撑满整行
         if (piece.to > piece.from) {
-          b.marks.push(cmEditor.markText({ line: n, ch: piece.from }, { line: n, ch: piece.to },
-            { className: cls }));
+          const mk = cmEditor.markText({ line: n, ch: piece.from }, { line: n, ch: piece.to },
+            { className: cls });
+          b.marks.push(mk);
+          if (liftEntry) liftEntry.marks.push(mk);
           return;
         }
-        // 空段没有文字可标，让就近那个 <br> 顶上（首段用它后面那个）
+        // 空段没有文字可标，让就近那个 <br> 顶上（首段用它后面那个）。
+        // 虚拟换行段之间的断点是 null（自适应换行补的占位），没有实体可标。
         const br = k === 0 ? c.brs[0] : c.brs[k - 1];
         if (!br || used.has(br)) return;
         used.add(br);
-        b.marks.push(cmEditor.markText({ line: n, ch: br.from }, { line: n, ch: br.to },
-          { className: cls + ' cm-tbl-gap' }));
+        const mk = cmEditor.markText({ line: n, ch: br.from }, { line: n, ch: br.to },
+          { className: cls + ' cm-tbl-gap' });
+        b.marks.push(mk);
+        if (liftEntry) liftEntry.marks.push(mk);
       });
       // 其余的 <br> 后面跟着有内容的段，换行由那段自己的盒子完成，这里只需隐形。
       // 位置仍按「本列 + 下一段的段号」给：光标停在 <br> 里时落点就在那儿，
       // 不给的话会落到行首去。
       c.brs.forEach((br, j) => {
+        if (!br) return;   // 虚拟换行的占位断点
         const next = c.pieces[j + 1];
         if (!used.has(br) && next && next.to > next.from) {
           b.marks.push(cmEditor.markText({ line: n, ch: br.from }, { line: n, ch: br.to },
-            { className: 'cm-tbl-abs cm-tbl-t' + b.tid + '-c' + c.p + ' cm-tbl-seg' + (j + 1) + ' cm-tbl-br' }));
+            { className: 'cm-tbl-abs cm-tbl-t' + b.tid + '-c' + c.p + ' cm-tbl-seg' + (pieceBase + j + 1) + ' cm-tbl-br' }));
         }
       });
     }
+  }
+
+  // 跨行逻辑行的「填充格」：本物理行没有这个列的片段（它的格子在逻辑行的
+  // 其它物理行上），用空盒子补出该列在本行的竖线，行首行的填充格带顶
+  // 边框、行尾行的带底边框 —— 整行网格在视觉上连成一体（J3.png 碎框）。
+  // 空盒子没有文本区间可标，用行首零宽 widget 挂（与「…」菜单按钮同机制），
+  // 几何量全部内联样式给：列的 left/width 按本表几何换算，top/height 撑满
+  // 本物理行（行有 cm-tbl-crel/cm-tbl-mline 定位基准，100% 即本行带高）。
+  // 一行缺失多列时合成一只 widget：CodeMirror 5 对同一锚点的多个
+  // coincident widget 只渲染一只（实测），分别挂会丢。
+  function addFillerCells(b, n, cols, rowTop, rowBottom) {
+    const box = document.createElement('span');
+    // pointer-events:none：填充盒只是视觉补线，不能挡住 CodeMirror 的
+    // 点选/拖选（点击空白列区域时光标应落在文本上）。
+    box.style.cssText = 'position:absolute;top:0;left:0;height:100%;width:0;pointer-events:none;';
+    for (const p of cols) {
+      const el = document.createElement('span');
+      const brd = '1px solid #d1d9e0';
+      el.style.cssText = 'position:absolute;top:0;height:100%;box-sizing:border-box;'
+        + 'background:#ffffff;'
+        + 'left:' + b.colLeft[p].toFixed(2) + 'em;width:' + b.colWidthEm[p].toFixed(2) + 'em;'
+        + 'border-left:' + brd + ';border-right:' + brd + ';'
+        + (rowTop ? 'border-top:' + brd + ';' : '')
+        + (rowBottom ? 'border-bottom:' + brd + ';' : '');
+      box.appendChild(el);
+    }
+    const handle = cmEditor.getLineHandle(n);
+    cmEditor.addLineClass(handle, 'text', 'cm-tbl-crel');
+    b.rowClasses.push([handle, 'cm-tbl-crel']);
+    b.marks.push(cmEditor.markText({ line: n, ch: 0 }, { line: n, ch: 0 },
+      { replacedWith: box, clearWhenEmpty: false }));
+  }
+
+  // 尾部上移格子的点击换算（J5.png 对齐诉求的配套）。格子文本被 margin-top
+  // 上移到逻辑行行首后，CodeMirror 的 coordsChar 按 y 带反推行号，会把点击
+  // 映射到行首物理行（错误位置）。这里捕获格内 mousedown，用 charCoords 实测
+  // 被移文字的坐标二分换算回正确的文档位置（charCoords 量的是真实渲染位置）。
+  // 键盘移动光标不受影响的：光标绘制同样走 charCoords，落在被移文字上。
+  let liftClickBound = false;
+  function bindLiftedCellClicks() {
+    if (liftClickBound || !cmEditor) return;
+    liftClickBound = true;
+    cmEditor.getWrapperElement().addEventListener('mousedown', (e) => {
+      if (e.button !== 0) return;
+      const cell = e.target.closest ? e.target.closest('.cm-tbl-cell') : null;
+      if (!cell) return;
+      const liftCls = [...cell.classList].find((k) => /cm-tbl-t\d+-lift\d+$/.test(k));
+      if (!liftCls) return;
+      const rec = liftedCells.find((r) => r.cls === liftCls);
+      if (!rec) return;
+      const ranges = rec.marks.map((m) => m.find()).filter(Boolean);
+      if (!ranges.length) return;
+      e.preventDefault();
+      e.stopPropagation();
+      const line = ranges[0].from.line;
+      const from = Math.min(...ranges.map((r) => r.from.ch));
+      const to = Math.max(...ranges.map((r) => r.to.ch));
+      let lo = from, hi = to;
+      while (lo < hi) {
+        const mid = (lo + hi + 1) >> 1;
+        if (cmEditor.charCoords({ line, ch: mid }, 'window').left <= e.clientX) lo = mid;
+        else hi = mid - 1;
+      }
+      const pos = { line, ch: lo };
+      if (e.shiftKey) cmEditor.setSelection(cmEditor.getCursor('anchor'), pos);
+      else cmEditor.setCursor(pos);
+      cmEditor.focus();
+    }, true);   // capture：先于 CodeMirror 自己的 mousedown 处理
   }
 
   function refreshTableMarks() {
@@ -857,22 +1298,41 @@
       if (!isRow(i) || !(i + 1 < lineCount) || fence[i + 1] || !TABLE_SEP_RE.test(cmEditor.getLine(i + 1))) continue;
       // 数据区到哪结束由 tableDataEnd 统一判定（它会连「下一张表的表头」一起排除）
       const isSep = (n) => n < lineCount && !fence[n] && TABLE_SEP_RE.test(cmEditor.getLine(n));
-      const to = tableDataEnd({ lineCount, isRow, isSep }, i + 1);
+      const isRowStart = (n) => n < lineCount && !fence[n] && TABLE_ROW_START_RE.test(cmEditor.getLine(n));
+      const to = tableDataEnd({ lineCount, fence, getLine: (n) => cmEditor.getLine(n), isRow, isRowStart, isSep }, i + 1);
       blocks.push({ from: i, to, sep: i + 1 });
       i = to;
     }
 
     // 编辑器可视宽度（一次重建算一次）：既决定哪些表值得渲染，也用于后面的压窄。
-    // 余量取 48px：行内边距 8 + 起始缩进 4 + 竖滚动条占位与取整误差
-    //（按 12px 算实测还差 30px 被折行，宁多勿少 —— 压多了只是多裁剪一点内容）
+    // 行的真实可用宽 = 滚动区 clientWidth（getScrollInfo 已扣竖滚动条）
+    // - 滚动区左右内边距 80px（style.css .CodeMirror-scroll padding 40px×2）
+    // - 行内边距 8px（CodeMirror 给 .CodeMirror-line 的 0 4px）。
+    // 旧算法按 wrapper.clientWidth - 48 估、没扣滚动区内边距：表格总宽落在
+    //「真实行宽 .. availPx」这个几十 px 的区间时不触发压窄，文档流行（多为
+    // 短格子的表头行）被 lineWrapping 折行、格子竖着摞（1366px 视口
+    //「技术落地侧复盘」表的表头实测两格摞成两行）。
     const wrapper = cmEditor.getWrapperElement();
     const fontPx = parseFloat(getComputedStyle(wrapper).fontSize) || 16;
-    const availPx = Math.max(160, wrapper.clientWidth - 48);
-    const perColPx = 18;                                       // 每列固定占位：padding 16 + border 2
+    const availPx = Math.max(160, cmEditor.getScrollInfo().clientWidth - 88);
 
-    // 列多到按可读宽度也放不进视口的表：整段保持源码形态，不渲染成表格。
-    // 实测 16 列的质量改进表压窄后每列只剩 3~4em，一列两三个字的碎片排版
-    // 比源码更难读。判定只看「列数 vs 可用宽」，与列内容无关。
+    // 探针容器宽 = 传统模式预览里表格的实际可用宽：HTML 表格的自动布局
+    // 分布随约束宽度变化，只有用预览同宽的量，列宽分布才与传统模式一致
+    // （实测同一份表在 1640 与 ~1560 约束下分布明显不同、总宽相同）。
+    // #content 在现代模式 display:none，但其父容器仍在布局、padding 可读。
+    let previewAvailPx = availPx + 88;
+    try {
+      const contentEl = document.getElementById('content');
+      const cs = getComputedStyle(contentEl);
+      const pad = parseFloat(cs.paddingLeft) + parseFloat(cs.paddingRight);
+      const parentW = contentEl.parentElement ? contentEl.parentElement.clientWidth : 0;
+      if (parentW > pad + 100) previewAvailPx = parentW - pad;
+    } catch (e) { /* 保持兜底值 */ }
+
+    // 列多到连 TABLE_MIN_COL_EM 都分不到的病态表：整段保持源码形态，不渲染。
+    // 普通的宽表（如 16 列的质量改进表）不在此列 —— 压窄 + 自适应换行后内容
+    // 全保留，观感与传统模式的窄列 HTML 表格一致。判定只看「列数 vs 可用宽」，
+    // 与列内容无关。
     const styleable = [];
     for (const b of blocks) {
       let cols = 0;
@@ -880,7 +1340,10 @@
         if (n === b.sep) continue;
         cols = Math.max(cols, pipePositions(cmEditor.getLine(n)).length - 1);
       }
-      if ((availPx - cols * perColPx) / Math.max(1, cols) >= TABLE_MIN_COL_EM * fontPx) {
+      b.compact = (availPx - cols * TABLE_PAD_PX_STD) / Math.max(1, cols)
+        < TABLE_COMPACT_AVG_EM * fontPx;
+      const perCol = b.compact ? TABLE_PAD_PX_COMPACT : TABLE_PAD_PX_STD;
+      if ((availPx - cols * perCol) / Math.max(1, cols) >= TABLE_MIN_COL_EM * fontPx) {
         styleable.push(b);
       }
     }
@@ -899,10 +1362,20 @@
     const next = [];
     for (let i = 0; i < styleable.length; i++) {
       const old = prev[i];
-      if (old && old.sig === sigs[i]) { next.push(old); continue; }   // 复用
+      // 复用时把行号更新到当前扫描值：sig 不含行号（上方增删行不该触发重建），
+      // 但块上的 from/to/sep 还是创建时的旧值 —— 上方删行后旧 to 可能超出
+      // 当前行数，复用块的段数统计循环 getLine(旧 to) 拿到 undefined 直接抛错
+      //（实测：删掉多行表格上面的一整行，下方表格复用时 pipePositions(undefined)）。
+      // 行号可安全更新：sig 相等即内容相同，列几何与位置无关；
+      // markText / 行句柄（rowClasses、sepHandle）由 CodeMirror 自己随编辑位移。
+      if (old && old.sig === sigs[i]) {
+        old.from = styleable[i].from; old.to = styleable[i].to; old.sep = styleable[i].sep;
+        next.push(old); continue;
+      }   // 复用
       if (old) dropTableBlock(old);                                   // 内容变了，先摘旧标注
       next.push({ sig: sigs[i], from: styleable[i].from, to: styleable[i].to, sep: styleable[i].sep,
                   marks: [], rowClasses: [], sepHandle: null, dirty: true,
+                  compact: !!styleable[i].compact,
                   tid: ++tableIdSeq, colLeft: [], colWidthEm: [] });
     }
     for (let i = styleable.length; i < prev.length; i++) dropTableBlock(prev[i]);  // 表格被删掉了
@@ -911,6 +1384,9 @@
     const dirty = next.filter((b) => b.dirty);
     if (dirty.length === 0) return;    // 只是行号漂移，标注无需重建
     for (const b of dirty) b.dirty = false;
+    liftedCells = [];          // 尾部格子注册表随重建重置（点击换算用）
+    pendingLiftRules = [];
+    wrapCache = null;          // 折行缓存只在本次重建内有效
 
 
     // 每张表的列宽只按**本表**的内容算（以前的实现按全文档所有表取最大，
@@ -920,43 +1396,81 @@
     let maxSegs = 1;
     for (const b of next) {
       if (b.colWidthEm.length) {   // 复用块：几何照旧，只需补统计段数
+        let openCol0 = 0;
         for (let n = b.from; n <= b.to; n++) {
           if (n === b.sep) continue;
           const text = cmEditor.getLine(n);
-          const pipes = pipePositions(text);
-          for (let p = 0; p + 1 < pipes.length; p++) {
-            const { pieces } = splitCellPieces(text, pipes[p] + 1, pipes[p + 1]);
+          const frags = lineFragments(text, n === b.from ? 0 : openCol0);
+          if (frags.length) openCol0 = frags[frags.length - 1].col;
+          for (const f of frags) {
+            const { pieces } = splitCellPieces(text, f.from, f.to);
             maxSegs = Math.max(maxSegs, pieces.length);
           }
         }
         continue;
       }
       const widths = [];
+      let openCol = 0;   // 开口列：上行末格跨行时，续行第一个片段归属的列
+      // 列宽优先用浏览器实测（隐藏渲染同一份表格，与现代模式的可用行同宽），
+      // 分布与传统模式浏览效果一致；量不出才退回按字符估算。
+      const measured = measureTableWidths(
+        Array.from({ length: b.to - b.from + 1 }, (_, k) => cmEditor.getLine(b.from + k)).join('\n'),
+        previewAvailPx);
+      let useHeuristicWidths = true;
+      if (measured) {
+        // 预览容器比编辑行宽约 100px（窄窗口下更明显），量出的总宽可能超行宽
+        // 引发折行摞叠 —— 等比缩到行宽内：保住传统模式的列宽比例，又装得下。
+        let sumPx = 0;
+        for (const w of measured) sumPx += w;
+        const scale = sumPx > availPx ? availPx / sumPx : 1;
+        for (let p = 0; p < measured.length; p++) widths[p] = measured[p] * scale / fontPx;
+        useHeuristicWidths = false;
+        b.measuredWidths = true;   // 量得的列宽是完整盒宽且已装进行宽，不再压窄
+      }
       for (let n = b.from; n <= b.to; n++) {
         if (n === b.sep) continue;
         const text = cmEditor.getLine(n);
-        const pipes = pipePositions(text);
-        for (let p = 0; p + 1 < pipes.length; p++) {
+        const frags = lineFragments(text, n === b.from ? 0 : openCol);
+        if (frags.length) openCol = frags[frags.length - 1].col;
+        for (const f of frags) {
           // 刻意不 trim：单元格区间含管道符两侧的空格，这些空格同样占宽度，
           // 按 trim 后算会让盒子偏窄、内容折行（实测表头被撑成两行）。
           // 含 <br> 的格子渲染出来是多行，宽度只由最长的那一段决定 ——
           // 按整段算会把各行的宽度加在一起，列被撑宽（实测「1<br>dd<br>dd」撑到两倍宽）。
-          const { pieces } = splitCellPieces(text, pipes[p] + 1, pipes[p + 1]);
+          // 多行表格行的续行片段同理：每行（片段）各是一条视觉行，取最大不取和。
+          // 紧凑表：管道符两侧的空格折叠进管道符（见下方标注循环），
+          // 渲染时不占宽度，这里也要裁掉再量，否则每列白加两格空格的宽度。
+          let cf = f.from, ct = f.to;
+          if (b.compact) {
+            while (cf < ct && (text[cf] === " " || text[cf] === "\t")) cf++;
+            while (ct > cf && (text[ct - 1] === " " || text[ct - 1] === "\t")) ct--;
+          }
+          const { pieces } = splitCellPieces(text, cf, ct);
           maxSegs = Math.max(maxSegs, pieces.length);
+          if (!useHeuristicWidths) continue;
+          const latinW = b.compact ? latinWeight() : 1;
           let w = 0;
           for (const piece of pieces) {
-            w = Math.max(w, visualWidth(text.slice(piece.from, piece.to)));
+            w = Math.max(w, visualWidth(text.slice(piece.from, piece.to), latinW));
           }
-          widths[p] = Math.max(widths[p] || 0, w);
+          widths[f.col] = Math.max(widths[f.col] || 0, w);
         }
       }
       // 用 em 而不是 ch：ch 是数字 0 的宽度（≈8px），而一个汉字就有 16px，
       // 用 ch 算出来的宽度会把中文单元格挤到换行（实测表头「姓名」被撑成两行）。
       // visualWidth 里 1 个 ASCII 记 1、1 个全角记 2，正好对应 0.5em / 1em；
-      // 再加 1.4em 覆盖左右内边距（各 0.5em）与边框、留一点余量，封顶 TABLE_MAX_COL_EM。
+      // 再加 padEm 覆盖左右内边距与边框、留一点余量，封顶 TABLE_MAX_COL_EM。
+      //（标准表 1.4em ≈ 18px；紧凑表 0.5em = 6px 开销 + 2px 余量，与各自 CSS 对应）
+      const padEm = b.compact ? TABLE_PAD_EM_COMPACT : TABLE_PAD_EM_STD;
       let left = 0.25;
       for (let p = 0; p < widths.length; p++) {
-        const wEm = Math.min((widths[p] || 0) * 0.5 + 1.4, TABLE_MAX_COL_EM);
+        // 浏览器实测的列宽已经是 em（px / 编辑器字号），直接用、不封顶 —
+        // 封顶（TABLE_MAX_COL_EM）是字符估算路径防单列表撑爆用的，浏览器的
+        // 自动布局自己会分配（实测传统模式给超长列 825px = 51.6em，封顶会
+        // 把它截断、比例失真）。字符估算的是「半角单位」要 ×0.5em 换算 + 固定余量。
+        const wEm = useHeuristicWidths
+          ? Math.min((widths[p] || 0) * 0.5 + padEm + TABLE_WIDTH_SLACK_EM, TABLE_MAX_COL_EM)
+          : (widths[p] || 0);
         if (p) left -= 0.0625;
         b.colLeft[p] = left;
         b.colWidthEm[p] = wEm;
@@ -964,23 +1478,58 @@
       }
     }
 
-    // 整表宽超出编辑器可视宽度时，按比例压窄本表所有列（格子里的内容裁剪，不换行）。
+    // 整表宽超出编辑器可视宽度时，按「内容比例」压窄本表：每列先保一个下限
+    // （自然宽低于 TABLE_FLOOR_COL_EM 的列保持自然宽），长文列超出下限的部分
+    // 按各自自然宽的比例消化。旧实现是水位压窄 —— 所有超限列一律压到同一个
+    // 水位，15 列的质量改进表每列都 5.1em，内容长短看不出差别；更早的等比
+    // 缩放把窄列压到一格一字竖着排（J1.png）。比例压窄让列宽随内容走。
     // 编辑器开着 lineWrapping：不压窄的话折行点会落在格子上，inline-block 整个
     // 挪到下一行，整表竖着摞（test.md「全网智能2.0复盘总结」那张表实测 92em vs 视口 76em）。
     // 对已经压过的块是幂等的：压完总宽 ≈ 可用宽，下次会走 usedPx <= availPx 跳过。
     // 每格真实占位 = 列宽 + 内边距 16px + 边框 2px（width 是 content-box），
     // 压窄时得把这份每列固定开销算进去，否则差几十像素还是会被折行（实测踩过）。
-    // availPx / perColPx / fontPx 在块扫描后已算好，直接复用。
+    // availPx / fontPx 在块扫描后已算好，每列固定开销按表取（标准 18px / 紧凑 6px）。
+    // 整表宽超出编辑器可视宽度时，按「内容比例」压窄（自适应内容）：
+    // 每列先保一个下限 —— 自然宽低于下限的列保持自然宽（问题来源这类
+    // 短列不被牵连），长文列超出下限的部分按各自自然宽的比例消化 ——
+    // 内容长的列更宽、内容短的列更窄，列宽随内容走。旧的水位压窄把
+    // 所有超限列压成同一个宽，15 列的质量改进表每列都 5.1em，内容长短
+    // 看不出差别（用户反馈「列宽不合适」，宽度普查实测）。
+    // 编辑器开着 lineWrapping：不压窄的话折行点会落在格子上，inline-block 整个
+    // 挪到下一行，整表竖着摞（test.md「全网智能2.0复盘总结」那张表实测 92em vs 视口 76em）。
+    // 对已经压过的块是幂等的：压完总宽 ≈ 可用宽，下次会走 usedPx <= availPx 跳过。
+    // 每格真实占位 = 列宽 + 内边距 16px + 边框 2px（width 是 content-box），
+    // 压窄时得把这份每列固定开销算进去，否则差几十像素还是会被折行（实测踩过）。
+    // availPx / fontPx 在块扫描后已算好，每列固定开销按表取（标准 18px / 紧凑 6px）。
     {
       for (const b of next) {
         if (!b.colWidthEm.length) continue;
+        if (b.measuredWidths) continue;   // 浏览器按预览同宽量的，必然装得下
+        const perCol = b.compact ? TABLE_PAD_PX_COMPACT : TABLE_PAD_PX_STD;
         const contentPx = b.colWidthEm.reduce((s, w) => s + w, 0) * fontPx;
-        const usedPx = contentPx + b.colWidthEm.length * perColPx;
+        const usedPx = contentPx + b.colWidthEm.length * perCol;
         if (usedPx <= availPx) continue;
-        const scale = Math.max(0.05, (availPx - b.colWidthEm.length * perColPx) / contentPx);
+        const availEm = (availPx - b.colWidthEm.length * perCol) / fontPx;
+        // 下限：窄列的自然宽（封顶 TABLE_FLOOR_COL_EM），保住短列完整显示。
+        const floors = b.colWidthEm.map((w) => Math.min(w, TABLE_FLOOR_COL_EM));
+        const sumFloor = floors.reduce((s, w) => s + w, 0);
         let left = 0.25;
+        if (sumFloor >= availEm) {
+          // 连下限总和都放不下（极窄视口兜底）：下限按比例再缩。
+          const k = availEm / sumFloor;
+          for (let p = 0; p < b.colWidthEm.length; p++) {
+            b.colWidthEm[p] = floors[p] * k;
+            if (p) left -= 0.0625;
+            b.colLeft[p] = left;
+            left += b.colWidthEm[p];
+          }
+          continue;
+        }
+        const extras = b.colWidthEm.map((w, p) => w - floors[p]);
+        const sumExtra = extras.reduce((s, w) => s + w, 0);
+        const s = (availEm - sumFloor) / Math.max(1e-6, sumExtra);
         for (let p = 0; p < b.colWidthEm.length; p++) {
-          b.colWidthEm[p] = Math.max(1, b.colWidthEm[p] * scale);
+          b.colWidthEm[p] = floors[p] + extras[p] * s;
           if (p) left -= 0.0625;
           b.colLeft[p] = left;
           left += b.colWidthEm[p];
@@ -1006,7 +1555,14 @@
     const rules = [];
     for (const b of next) {
       for (let p = 0; p < b.colWidthEm.length; p++) {
-        rules.push(`.live-preview .cm-tbl-t${b.tid}-c${p}{width:${b.colWidthEm[p].toFixed(2)}em;left:${b.colLeft[p].toFixed(2)}em}`);
+        // 列宽写 toFixed(2)（1/100 em = 0.16px），别改成向上取整 ——
+        // 文档流里的格子按「上一格宽 − 1px 负外边距」依次排，绝对的格子直接用
+        // left（由未取整的列宽累加而来）。两边一旦不等宽就会逐列积累出 1px 的
+        // 横向错位（清单 R3 实测：c1/c2 各偏 1px）。
+        // 内容盒留的余量在 .cm-tbl-cell 的横向内边距里（比传统 td 少 1px），
+        // 不在这个宽度上，所以这里不需要多留。
+        rules.push(`.live-preview .cm-tbl-t${b.tid}-c${p}` +
+          `{width:${b.colWidthEm[p].toFixed(2)}em;left:${b.colLeft[p].toFixed(2)}em}`);
       }
     }
 
@@ -1021,6 +1577,21 @@
         rightmostCol = Math.max(rightmostCol, pipePositions(cmEditor.getLine(n)).length - 2);
       }
 
+      // 逻辑行切分：以 | 开头的行是逻辑行行首，其余行是上一逻辑行的续行
+      //（多行表格行——单元格内容里直接换行）。跨行的逻辑行要按「整行」画边框：
+      // 顶边框只在行首那条物理行、底边框只在行尾那条，中间物理行只画竖线，
+      // 本行没有的列用填充盒补全（J3.png「产品价值规划」表碎框的根因）。
+      const rowStarts = [];
+      for (let n = b.from; n <= b.to; n++) {
+        if (n === b.sep) continue;
+        if (TABLE_ROW_START_RE.test(cmEditor.getLine(n))) rowStarts.push(n);
+      }
+
+      let openColMark = 0;   // 开口列：多行表格行里，续行第一个片段归属的列
+      let rowSegsAbove = 0;  // 当前逻辑行已消耗的自然段数（跨物理行累计，上移量基准）
+      let colConsumed = {};  // 逻辑行内每列已耗段数：各列内容按「从行顶连续往下排」对齐
+      let rowTNeeded = 0;    // 本逻辑行需要的最小总行高（所有列内容底部的最大值）
+      let rowL = 1;          // 本逻辑行的总行数（各列渲染行数的最大值，见下面的预扫）
       for (let n = b.from; n <= b.to; n++) {
         const text = cmEditor.getLine(n);
         if (n === b.sep) {
@@ -1041,19 +1612,120 @@
             { className: 'cm-tbl-pipe' }));
         });
 
-        // 每格先按 <br> 切成段：段数 > 1 的行改用绝对定位渲染，其余照旧走文档流
+        // 每格先按 <br> 切成段：段数 > 1 的行改用绝对定位渲染，其余照旧走文档流。
+        // 片段来自 lineFragments：以 | 开头的行按管道符切；续行（多行表格行）
+        // 整行或按行内管道符切，第一个片段接到上面递下来的开口列。
+        const frags = lineFragments(text, n === b.from ? 0 : openColMark);
+        if (frags.length) openColMark = frags[frags.length - 1].col;
+        // 本物理行在逻辑行里的位置：行首物理行画顶边框、行尾物理行画底边框，
+        // 中间物理行两向都收掉（竖线由本行格子与填充盒续上）。
+        // 表头恒为单物理行逻辑行（n <= b.sep，分隔行在上方已被 skip）：
+        // 不把分隔行算进表头的逻辑行跨度，否则表头格子的底边框会被收掉。
+        let r0 = n, r1 = n;
+        if (n > b.sep) {
+          r0 = rowStarts[0];
+          r1 = b.to;
+          for (const s of rowStarts) {
+            if (s <= n) r0 = s;
+            else { r1 = s - 1; break; }
+          }
+        }
+        const rowTop = n === r0;
+        const rowBottom = n === r1;
+        const multiLineRow = r1 > r0;
+        if (rowTop) {          // 新逻辑行：累计清零
+          rowSegsAbove = 0;
+          colConsumed = {};
+          rowTNeeded = 0;
+        }
+        // 跨行逻辑行先扫一遍整行，数出每列一共多少「渲染行」（含自适应换行
+        // 折出的虚拟行）：整行高 = 24×L + 13（L = 各列行数的最大值），
+        // 每个格子再按 (L − 本格行数)/2 个行距整体下移 —— 传统 td 的
+        // vertical-align: middle 就是把整格内容在行高里居中。
+        // 不能按物理行累加段数代替 L：一个格子在一行里折出 13 段、别的列
+        // 还在往下一行接着写时，累加值会远超真实行数（竞争分析表实测
+        // 累加 30 vs 真实 18），整行被撑高一倍。
+        if (rowTop && multiLineRow) {
+          rowL = 1;
+          const perCol = [];
+          const colStarts = {};   // 物理行号 -> { 列号: 本行开始前该列已累计的段数 }
+          let preOpen = 0;
+          for (let m = r0; m <= r1; m++) {
+            const snap = {};
+            for (const p in perCol) snap[p] = perCol[p];
+            colStarts[m] = snap;
+            const mt = cmEditor.getLine(m);
+            const fr = lineFragments(mt, m === r0 ? 0 : preOpen);
+            if (fr.length) preOpen = fr[fr.length - 1].col;
+            for (const f of fr) {
+              let from = f.from, to = f.to;
+              if (b.compact) {
+                while (from < to && (mt[from] === " " || mt[from] === "\t")) from++;
+                while (to > from && (mt[to - 1] === " " || mt[to - 1] === "\t")) to--;
+              }
+              const { pieces } = splitCellPieces(mt, from, to);
+              const budget = wrapBudgetPx(b, f.col, fontPx);
+              const measurePx = makeMeasurePx(fontPx, m === b.from);
+              let cnt = 0;
+              for (const piece of pieces) {
+                const wrapped = piece.to > piece.from
+                  ? wrapCached(m, piece, budget, measurePx, mt) : null;
+                cnt += wrapped ? wrapped.pieces.length : 1;
+              }
+              perCol[f.col] = (perCol[f.col] || 0) + cnt;
+            }
+          }
+          for (const c of perCol) if (c > rowL) rowL = c;
+          b.curRowColLines = perCol;     // 每列的总行数：格的居中量要按整格算，不是按本行片段
+          b.curRowColStarts = colStarts; // 每列在每个物理行上的起始段号（段号要跨行连续）
+        }
+        const segsAboveHere = rowSegsAbove;
         const cells = [];
-        for (let p = 0; p + 1 < pipes.length; p++) {
-          const from = pipes[p] + 1, to = pipes[p + 1];
-          let cell = Object.assign({ p, from, to }, splitCellPieces(text, from, to));
-          // 自适应换行：单段且超出列宽的格子，按列宽预算折成多个「虚拟段」。
+        for (const f of frags) {
+          const p = f.col;
+          let from = f.from, to = f.to;
+          // 紧凑表：管道符两侧的空格折叠进管道符的隐形标记。
+          // 窄列里一个前导空格（8px）就占掉内容盒一大半，还会在自适应换行里
+          // 单独成段（「空格自己占一行」，内容错行）。全空格格保持原区间，
+          // 走原来的空格子逻辑。
+          if (b.compact) {
+            let tf = from, tt = to;
+            while (tf < tt && (text[tf] === " " || text[tf] === "\t")) tf++;
+            while (tt > tf && (text[tt - 1] === " " || text[tt - 1] === "\t")) tt--;
+            if (tf < tt) {
+              if (tf > from) b.marks.push(cmEditor.markText(
+                { line: n, ch: from }, { line: n, ch: tf }, { className: "cm-tbl-pipe" }));
+              if (tt < to) b.marks.push(cmEditor.markText(
+                { line: n, ch: tt }, { line: n, ch: to }, { className: "cm-tbl-pipe" }));
+              from = tf; to = tt;
+            }
+          }
+          let cell = Object.assign({ p, from, to, pipeAfter: f.pipeAfter }, splitCellPieces(text, from, to));
+          // 自适应换行：超出列宽预算的段按列宽预算折成多个「虚拟段」。
           // 排版走与 <br> 多行完全相同的 markMultilineRow 通路（行高随内容增长），
           // 内容全部可见，不再靠 overflow 裁剪。编辑后防抖重建会重新折算。
-          if (cell.pieces.length === 1 && cell.brs.length === 0
-              && cell.pieces[0].to > cell.pieces[0].from) {
-            const budget = wrapBudgetUnits(b, p);
-            const wrapped = wrapPieceByBudget(text, cell.pieces[0], budget);
-            if (wrapped) cell = Object.assign({ p, from, to }, wrapped);
+          // <br> 切出来的段同样要折：以前只折「单段格子」，<br> 段在列被压窄后
+          // 会整段裁成省略号（test.md 第 6 行的「1、【事件中心】…」实测）。
+          // brs 用 null 占位补齐：保持「brs[j] 是 pieces[j] 与 pieces[j+1] 之间
+          // 的断点」这个对齐关系，markMultilineRow 的空段/换行标记逻辑不受影响。
+          {
+            const budget = wrapBudgetPx(b, p, fontPx);
+            const measurePx = makeMeasurePx(fontPx, n === b.from);
+            const pieces2 = [], brs2 = [];
+            let grew = false;
+            cell.pieces.forEach((piece, j) => {
+              const wrapped = piece.to > piece.from
+                ? wrapCached(n, piece, budget, measurePx, text) : null;
+              if (wrapped) {
+                pieces2.push(...wrapped.pieces);
+                grew = true;
+                for (let q = 1; q < wrapped.pieces.length; q++) brs2.push(null);
+              } else {
+                pieces2.push(piece);
+              }
+              if (j < cell.brs.length) brs2.push(cell.brs[j]);
+            });
+            if (grew) cell = Object.assign({ p, from, to, pipeAfter: f.pipeAfter }, { pieces: pieces2, brs: brs2 });
           }
           cells.push(cell);
         }
@@ -1067,7 +1739,9 @@
           addTableMenuWidget(b, n, text.length, b.colLeft[rightmostCol] + b.colWidthEm[rightmostCol]
             + ROW_MENU_GAP_EM, '表格操作', openHeaderMenu);
         }
-        if (n > b.sep && cells.length) {
+        // 数据行的「…」只挂逻辑行的行首（以 | 开头的行）：多行表格行的续行
+        // 属于上一行，不单独挂按钮（删除本行也是按整个逻辑行删）。
+        if (n > b.sep && cells.length && TABLE_ROW_START_RE.test(text)) {
           const lastCol = cells[cells.length - 1].p;
           const rightEm = (b.colLeft[lastCol] !== undefined)
             ? b.colLeft[lastCol] + b.colWidthEm[lastCol]
@@ -1075,23 +1749,68 @@
           addTableMenuWidget(b, n, text.length, rightEm + ROW_MENU_GAP_EM, '行操作', openRowMenu);
         }
 
-        const segs = Math.max(1, ...cells.map((c) => c.pieces.length));
-        if (segs > tblSegRulesMax) tblSegRulesMax = segs;
-        if (segs > 1) {
-          markMultilineRow(b, n, cells, segs);
-          continue;
-        }
+        const naturalSegs = Math.max(1, ...cells.map((c) => c.pieces.length));
+        // 各列内容「从逻辑行行顶连续往下排」的通用上移（J5.png 对齐诉求，
+        // 对所有表格生效）：每个片段上移到「本列已耗段数」的位置。
+        // 行首开始的列（segsAbove 恰好等于本列已耗段数）上移量为 0、位置不动；
+        // 写在逻辑行靠后物理行才开始的列（尾部封闭格如数据基座/P1、中途才
+        // 开口的列如竞争分析表的友商列）整列上移，全部从行顶开始对齐。
+        // 续行首片段是开口列的延续，本列已耗段数与 segsAbove 同步，自然为 0。
+        // 跨行逻辑行的定位不再靠「上移到某一段」：每个格子的段顶 = 行首内边距 +
+        // 居中下移量 + 段序号×行距（见 markMultilineRow 与生成的段顶规则），
+        // 与它写在哪个物理行无关，所以这里不再累计上移量。
         for (const c of cells) {
-          // 格子被删空时（两个管道符之间一个字符都没有）它的区间是零长度：
-          // CodeMirror 对零长度标记不生成 span，格子会连盒子一起消失 —— 边框、
-          // 背景、高度全没，整行看起来被压扁（实测 `|   |   |   |` 删空后只剩
-          // 27px 行高，格高从 37 掉到没有）。这里把后面那根管道符一起标进来给
-          // 它个实体，并用 cm-tbl-blank 抹掉管道符的缩字号效果（1px 字号会让
-          // 盒子又扁又矮）。
-          const blank = c.to === c.from;
-          b.marks.push(cmEditor.markText(
-            { line: n, ch: c.from }, { line: n, ch: blank ? pipes[c.p + 1] + 1 : c.to },
-            { className: cellClass(c.p, n === b.from, b.tid) + (blank ? ' cm-tbl-blank' : '') }));
+          const used = colConsumed[c.p] || 0;
+          colConsumed[c.p] = used + c.pieces.length;
+          if (colConsumed[c.p] > rowTNeeded) rowTNeeded = colConsumed[c.p];
+        }
+        // 行高兜底只落在逻辑行最后一行：总行高要容下「所有列内容的底部」，
+        // 中间物理行保持自然高度 —— 兜底加在中间行会在行中留出空带，
+        // 把开口列的后续内容顶散（竞争分析表多列依次开口时实测）。
+        let lineSegs = naturalSegs;
+        if (rowBottom && rowTNeeded > segsAboveHere + lineSegs) {
+          lineSegs = rowTNeeded - segsAboveHere;
+        }
+        if (lineSegs > tblSegRulesMax) tblSegRulesMax = lineSegs;
+        // 跨行逻辑行的段号是「整格内序号」，最大到整行行数行 —— 段顶/末段高度的
+        // 规则要覆盖到这个数，只按本行片段数生成会缺规则（末段拉不到行底）。
+        if (multiLineRow && rowL > tblSegRulesMax) tblSegRulesMax = rowL;
+        rowSegsAbove += naturalSegs;
+        // 续行（首格列号 > 0）即使只有一段也要走绝对定位：文档流从左往右排，
+        // 首格会落到行首（= 第 0 列的位置），续行内容对不到它所属的列上。
+        // 含上移格子的行走绝对定位（margin-top 只对绝对定位盒子可控）。
+        // 跨行逻辑行整行都走绝对定位：格子的段顶要按「行首内边距 + 居中下移 +
+        // 段序号×行距」算，而文档流里第一个格子总是从行首排起、把它的列号
+        // 当成第 0 列，两者对不上（续行尤其明显）。
+        if (multiLineRow || lineSegs > 1 || cells.some((c) => c.liftVal)
+            || (frags.length > 0 && frags[0].col > 0)) {
+          markMultilineRow(b, n, cells, lineSegs, rowTop, rowBottom, multiLineRow, rowL);
+        } else {
+          for (const c of cells) {
+            // 格子被删空时（两个管道符之间一个字符都没有）它的区间是零长度：
+            // CodeMirror 对零长度标记不生成 span，格子会连盒子一起消失 —— 边框、
+            // 背景、高度全没，整行看起来被压扁（实测 `|   |   |   |` 删空后只剩
+            // 27px 行高，格高从 37 掉到没有）。这里把后面那根管道符一起标进来给
+            // 它个实体，并用 cm-tbl-blank 抹掉管道符的缩字号效果（1px 字号会让
+            // 盒子又扁又矮）。
+            const blank = c.to === c.from && c.pipeAfter >= 0;
+            // 只有单物理行逻辑行会走到这里（跨行逻辑行整行走绝对定位，
+            // 见上面的分支），所以格子按普通的一行内边距 + 上下边框渲染即可。
+            const flowCls = cellClass(c.p, n === b.from, b.tid, b.compact) + (blank ? ' cm-tbl-blank' : '');
+            b.marks.push(cmEditor.markText(
+              { line: n, ch: c.from }, { line: n, ch: blank ? c.pipeAfter + 1 : c.to },
+              { className: flowCls }));
+          }
+        }
+        // 跨行逻辑行：本物理行没有的列，用填充盒补出竖线（行首行补顶边框、
+        // 行尾行补底边框），整行网格在视觉上连成一体。
+        if (multiLineRow && frags.length) {
+          const present = new Set(frags.map((f) => f.col));
+          const missing = [];
+          for (let p = 0; p < b.colWidthEm.length; p++) {
+            if (!present.has(p)) missing.push(p);
+          }
+          if (missing.length) addFillerCells(b, n, missing, rowTop, rowBottom);
         }
       }
     }
@@ -1100,12 +1819,59 @@
     // 含换行的行是绝对定位，每段顶位与整行高度都由这两个规则给：
     //   .cm-tbl-seg<k>    第 k 段的 top：每段就是格子里的第 k 行。
     //   .cm-tbl-mline<k>  行高：绝对定位的盒子不占位，整行高度得自己给。
-    for (let k = 1; k <= tblSegRulesMax; k++) {
-      rules.push(`.live-preview .cm-tbl-seg${k}{top:calc(${k} * var(--cm-tbl-cellh))}`);
+    // 段顶 = vpad/2 + k×行距：先把整行 13px 的非内容高度分一半到顶上（与传统 td
+    // 的上内边距对齐），再按行距往下摞。段数从 0 起写 —— 第 0 段以前靠静态位置
+    // 落位，现在也走统一算式，行距变化时才不会只剩它一个偏。
+    // 选择器要带 .cm-tbl-cell.cm-tbl-abs：压过 style.css 里同名前缀的规则。
+    // 段顶（行内第 k 段）= 整行内区起点 + 本格居中下移量 + k×行距，
+    // 再减掉本物理行行顶的行内坐标（--lmd-lt；单物理行逻辑行是 0）。
+    // 一套算式同时管单物理行与跨行两种逻辑行 —— 段的落点只由「它在整行里
+    // 排第几行」决定，跟它写在哪个物理行无关。
+    for (let k = 0; k <= tblSegRulesMax; k++) {
+      rules.push(`.live-preview .CodeMirror-line .cm-tbl-cell.cm-tbl-abs` +
+        `:not(.cm-tbl-top):not(.cm-tbl-vmid)` +
+        `.cm-tbl-seg${k}{top:calc(var(--lmd-lt, 0px) + var(--cm-tbl-vpad) / 2` +
+        ` + var(--lmd-c, 0px) + ${k} * var(--cm-tbl-lineh))}`);
     }
-    for (let k = 2; k <= tblSegRulesMax; k++) {
-      rules.push(`.live-preview .CodeMirror-line.cm-tbl-mline${k}` +
-        `{height:calc(${k} * var(--cm-tbl-cellh)) !important}`);
+    // 每格最后一段的高度：从本段顶拉直到逻辑行行底。矮格子（折行少的）底边框
+    // 与整行对齐，行与行之间的横线贯通成网格（见 markMultilineRow）。
+    // 本段顶的行内坐标 = vpad/2 + 居中下移 + k×行距，行底 = vpad + L×行距，
+    // 故高度 = vpad/2 + 行距 + 居中下移 —— 与「写在哪个物理行、整行共几段」
+    // 都无关，跨行逻辑行也直接成立（旧式按 100% 算，只在单物理行时才对得上）。
+    for (let k = 1; k < tblSegRulesMax; k++) {
+      rules.push(`.live-preview .CodeMirror-line .cm-tbl-cell.cm-tbl-lasth${k}` +
+        `{height:calc(var(--cm-tbl-vpad) / 2 + var(--cm-tbl-lineh) + var(--lmd-c, 0px))}`);
+    }
+    // 按格动态规则（居中下移量 / 单段格通高 / —— 见 markMultilineRow）。
+    for (const r of pendingLiftRules) rules.push(r);
+    // 跨行逻辑行的行高：整行高 = vpad + L×行距，按物理行数平分给每一行；
+    // 行首物理行分到的那份里还含着整行顶部的半个 vpad，所以行顶的行内坐标
+    // --lmd-lt 也在这条规则里一起给（第 n 行 = −n × 每行高度）。
+    // 不能按「本行有几段」定行高：一个格子在一行里折出十几段、别的列还在
+    // 往下写时，段数累加远超真实行数，整行会被撑高一倍（竞争分析表实测 30 vs 18）。
+    for (const b of next) {
+      if (!b.rowGeoms) continue;
+      for (const g of b.rowGeoms) {
+        const P = g.r1 - g.r0 + 1;
+        const rowH = `(var(--cm-tbl-vpad) + ${g.rowL} * var(--cm-tbl-lineh))`;
+        for (const ln of g.lines) {
+          const idx = ln.n - g.r0;
+          rules.push(`.live-preview .CodeMirror-line.cm-tbl-tl${b.tid}-${ln.u}` +
+            `{height:calc(${rowH} / ${P}) !important;` +
+            `--lmd-lt:calc(-${idx} * ${rowH} / ${P})}`);
+        }
+      }
+    }
+    // 单物理行逻辑行的行高：vpad + N×行距 —— 与传统表格的 24N + 13 相等。
+    // （mline1 也要写：续行只有一段时也走绝对定位，盒子不占位，行高得自己给。）
+    for (let k = 1; k <= tblSegRulesMax; k++) {
+      const base = `.live-preview .CodeMirror-line.cm-tbl-mline${k}`;
+      const h = (extra) => `${base}${extra}{height:calc(`;
+      const tail = `${k} * var(--cm-tbl-lineh)) !important}`;
+      rules.push(h('.cm-tbl-mtop.cm-tbl-mbot') + `var(--cm-tbl-vpad) + ` + tail);
+      rules.push(h('.cm-tbl-mtop:not(.cm-tbl-mbot)') + `var(--cm-tbl-vpad) / 2 + ` + tail);
+      rules.push(h('.cm-tbl-mbot:not(.cm-tbl-mtop)') + `var(--cm-tbl-vpad) / 2 + ` + tail);
+      rules.push(h('') + tail);
     }
     let st = document.getElementById('cm-table-style');
     if (!st) {
@@ -1117,6 +1883,7 @@
     if (st.textContent !== css) st.textContent = css;
 
     updateSepReveal();   // 重建后按当前光标位置决定分隔行是否展开
+    bindLiftedCellClicks();   // 尾部上移格子的点击换算（幂等，只绑一次）
 
     // 必须让 CodeMirror 重新测量行高：分隔行被 CSS 压成 0 高（.cm-tbl-sep-line），
     // 而 CM 内部的高度模型里它仍占满一行 —— 不刷新的话，它的「y 坐标 → 行号」换算
@@ -1206,14 +1973,18 @@
 
   // 轻量版「这行是表格数据行」：只看行形状和上方有没有分隔行，不算围栏掩码 ——
   // 它挂在每次光标移动上，不能做重活。代码围栏里的行即使被误判也没关系，
-  // 那里根本没有按钮可显。
+  // 那里根本没有按钮可显。多行表格行的行首不要求以 | 收尾（开口格跨行），
+  // 向上扫时跳过续行（不以 | 开头的非空行属于上面的逻辑行）。
   function isRowShapedDataLine(line) {
     const text = cmEditor.getLine(line);
-    if (text === undefined || !TABLE_ROW_RE.test(text) || TABLE_SEP_RE.test(text)) return false;
+    if (text === undefined || !TABLE_ROW_START_RE.test(text) || TABLE_SEP_RE.test(text)) return false;
     for (let n = line - 1; n >= 0; n--) {
       const above = cmEditor.getLine(n);
-      if (above === undefined || !TABLE_ROW_RE.test(above)) return false;
+      if (above === undefined) return false;
+      const t = above.trim();
       if (TABLE_SEP_RE.test(above)) return true;
+      if (t === "") return false;                     // 空行：上方不是表格
+      // 其余行（表格行或续行）都继续向上找分隔行
     }
     return false;
   }
@@ -1235,15 +2006,21 @@
     if (rowMenuOffChange) { cmEditor.off('change', rowMenuOffChange); rowMenuOffChange = null; }
   }
 
-  // 这行现在还是不是「表格里的数据行」。表头行与分隔行都不算 —— 删掉它们
-  // 表格就不再是表格了，菜单里不该给这个口子。
+  // 这行现在还是不是「表格里的数据行」（多行表格行的续行也算 —— 删掉的是
+  // 它所属的整个逻辑行）。表头行与分隔行都不算 —— 删掉它们表格就不再是
+  // 表格了，菜单里不该给这个口子。
   function isDataRowLine(line) {
     const t = tableLineTesters(cmEditor);
-    if (!t.isRow(line) || t.isSep(line)) return false;
-    let n = line;                                            // 往上找本表的分隔行
-    while (n - 1 >= 0 && t.isRow(n - 1) && !t.isSep(n - 1)) n--;
-    if (!(n - 1 >= 0 && t.isSep(n - 1))) return false;       // 上面没有分隔行 -> 不是表格
-    return line >= n;                                        // n 起是数据区，n-1 是分隔行
+    const start = logicalRowStart(t, line);
+    if (start < 0 || t.isSep(start)) return false;
+    let n = start;                                           // 往上找本表的分隔行
+    while (n - 1 >= 0) {
+      if (t.isSep(n - 1)) return true;                       // 数据区上界
+      const prev = logicalRowStart(t, n - 1);                // 上一逻辑行的行首
+      if (prev < 0) return false;                            // 断开了 -> 不是表格
+      n = prev;
+    }
+    return false;
   }
 
   // 建菜单 + 定位 + 挂成单例。items = [{ label, run }]，run 在菜单收起之后才调 ——
@@ -1292,19 +2069,22 @@
     }]);
   }
 
-  // 删除第 line 行整行（连同它的换行）
+  // 删除 line 所属的整个逻辑行（多行表格行连同续行一起删，连同行末换行）
   function deleteTableRowAt(line) {
+    const t = tableLineTesters(cmEditor);
+    const start = logicalRowStart(t, line);
+    if (start < 0) return;
+    const end = logicalRowEnd(t, start);
     const count = cmEditor.lineCount();
-    if (line < 0 || line >= count) return;
-    if (line < count - 1) {
-      cmEditor.replaceRange('', { line, ch: 0 }, { line: line + 1, ch: 0 });
-    } else if (line > 0) {
+    if (end < count - 1) {
+      cmEditor.replaceRange('', { line: start, ch: 0 }, { line: end + 1, ch: 0 });
+    } else if (start > 0) {
       // 最后一行后面没有换行可删，改删它前面那个换行
-      cmEditor.replaceRange('', { line: line - 1, ch: cmEditor.getLine(line - 1).length },
-        { line, ch: cmEditor.getLine(line).length });
+      cmEditor.replaceRange('', { line: start - 1, ch: cmEditor.getLine(start - 1).length },
+        { line: end, ch: cmEditor.getLine(end).length });
     }
     // 光标落到顶上来的那一行的第一格（没有了就不动）
-    const at = Math.min(line, cmEditor.lineCount() - 1);
+    const at = Math.min(start, cmEditor.lineCount() - 1);
     if (at >= 0 && isDataRowLine(at)) moveToTableCell(cmEditor, at, 0);
     cmEditor.focus();
   }
@@ -1381,9 +2161,47 @@
     const fence = computeFenceMask();
     return {
       lineCount,
+      fence,
+      getLine: (n) => cm.getLine(n),
       isRow: (n) => n < lineCount && !fence[n] && TABLE_ROW_RE.test(cm.getLine(n)),
+      isRowStart: (n) => n < lineCount && !fence[n] && TABLE_ROW_START_RE.test(cm.getLine(n)),
       isSep: (n) => n < lineCount && !fence[n] && TABLE_SEP_RE.test(cm.getLine(n)),
     };
+  }
+
+  // 一个逻辑行的结束行（含）：只在当前行**未封死**（开口格跨行）时，
+  // 才把后面的续行（非空、不以 | 开头、不在围栏内）并进这一行。
+  // 已封死的行后面紧跟的普通文本行不吞 —— 那是正文/下一段（例如
+  // 「▎客户原话（节选）」这种用特殊竖线开头的栏目名），吞进末格会
+  // 多出一个游离格子。注意与 md-render.js 的 mergeTableCells 有出入：
+  // 它连封死行后的文本行也吞（传统模式把 ▎ 行吞进了上一格），
+  // 现代模式按 GFM 的边界来 —— 表格在遇到非表格行时结束。
+  function logicalRowEnd(t, n) {
+    const unterminated = (line) => {
+      const end = t.getLine(line).replace(/\s+$/, "").length;
+      return end > 0 && !(t.getLine(line)[end - 1] === "|" && t.getLine(line)[end - 2] !== "\\");
+    };
+    let end = n;
+    while (unterminated(end) && end + 1 < t.lineCount && !t.fence[end + 1]) {
+      const nt = t.getLine(end + 1).trim();
+      if (nt === "" || nt.startsWith("|")) break;
+      end++;
+    }
+    return end;
+  }
+
+  // 本行所属逻辑行的行首；不是表格行（或上面断开了）返回 -1。
+  function logicalRowStart(t, line) {
+    if (line < 0 || line >= t.lineCount || t.fence[line]) return -1;
+    if (t.isRowStart(line)) return line;
+    let n = line;
+    while (n - 1 >= 0 && !t.fence[n - 1]) {
+      const at = t.getLine(n - 1).trim();
+      if (at === "") return -1;
+      if (at.startsWith("|")) return logicalRowEnd(t, n - 1) >= line ? n - 1 : -1;
+      n--;
+    }
+    return -1;
   }
 
   // 从本表的「分隔行」往下走，返回数据区的最后一行（含）。三处共用：块扫描
@@ -1399,8 +2217,12 @@
   // （实测两张表都渲染不出来，只剩一堆 `| --- | --- |`）。
   function tableDataEnd(t, sep) {
     let to = sep;
-    while (to + 1 < t.lineCount && t.isRow(to + 1) && !t.isSep(to + 1)
-           && !(to + 2 < t.lineCount && t.isSep(to + 2))) to++;
+    while (to + 1 < t.lineCount) {
+      const n = to + 1;
+      if (!t.isRowStart(n) || t.isSep(n)) break;         // ① 非表格行（空行、正文）
+      if (t.isSep(n + 1)) break;                         // ③ 下一张表的表头
+      to = logicalRowEnd(t, n);                          // 吞掉整个逻辑行（含续行）
+    }
     return to;
   }
 
@@ -2191,7 +3013,7 @@
     currentMarkdownText = text;
     lastSavedText = text;        // 刚读进来的内容就是磁盘上的，作为自动保存的基准
     headingOffsets = parseHeadingOffsets(text);
-    const html = MdRender.renderMarkdown(text, marked);
+    const html = renderMarkdownHtml(text);
     contentEl.innerHTML = html;
     // 现代模式下 contentEl 是隐藏的，没必要把图片一张张读进内存；
     // 切回传统模式时 setMode() 会重新渲染并解析图片
@@ -2884,7 +3706,7 @@
       stopAutosave();
       isEditMode = false;
       if (currentFile) {
-        contentEl.innerHTML = MdRender.renderMarkdown(currentMarkdownText, marked);
+        contentEl.innerHTML = renderMarkdownHtml(currentMarkdownText);
         await resolveImages();
       }
     }
@@ -2911,7 +3733,7 @@
         // 来源不可写（如拖入的单文件没有可写句柄）时保存会失败，
         // 但不能因此卡在编辑模式 —— 继续切回浏览，错误已由 saveCurrentFile 提示
       }
-      contentEl.innerHTML = MdRender.renderMarkdown(currentMarkdownText, marked);
+      contentEl.innerHTML = renderMarkdownHtml(currentMarkdownText);
       await resolveImages();
       isEditMode = false;
       applySurface();

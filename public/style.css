@@ -825,11 +825,16 @@ html {
     Helvetica, Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji";
   font-size: 16px;
   line-height: 1.7;
-  /* 一个单元格盒子的高度 = 行高 + 上下内边距(4px×2) + 上下边框(1px×2)。
-     含 <br> 的表格行要把格子逐行摞起来、并给整行定高，都按这个值算
-     （见下面「单元格里的换行」一节）。改行高或 .cm-tbl-cell 的内边距/边框，
-     这里必须跟着改，否则格子会错位。 */
-  --cm-tbl-cellh: calc(1.7em + 10px);
+  /* 表格几何基准 —— 目标是与传统模式「浏览」下的 HTML 表格逐像素一致
+     （.markdown-body 的正文字号 16px / 行高 1.5 / td padding 6px 13px）：
+       --cm-tbl-lineh  单元格里一行的行距 = 1.5em = 24px
+       --cm-tbl-vpad   整行上下占的非内容高度（内边距 5.5px×2 + 上下边框各 1px）
+                       取 13px —— 传统 td 是 6+6 内边距 + 1px 共享边框，同为 13px。
+                       合起来行总高 = 24N + 13，与传统表格的每一行严格相等。
+     --cm-tbl-cellh 保留旧名，含义收敛为「一行占据的间距」（段盒按它往下摞）。 */
+  --cm-tbl-lineh: 1.5em;
+  --cm-tbl-vpad: 13px;
+  --cm-tbl-cellh: var(--cm-tbl-lineh);
 }
 
 /*
@@ -937,14 +942,25 @@ html {
    相邻两格各画一条 1px 边会叠成 2px，用负外边距压回 1px（等价 border-collapse）。
    white-space: nowrap —— 行宽超过视口时也要保持「一行」，由 refreshTableMarks 按比例
    压窄列宽兜底；不然折行点落在格子上，inline-block 整个挪到下一行，整表竖着摞。 */
+/* 上下内边距 5.5px + 上下边框各 1px = 13px，与传统 td（6+6 内边距 + 1px 共享边框）
+   的整行非内容高度一致 —— 单行格因此也是 24 + 13 = 37px，与传统表格相同。
+   横向 12px（比传统 td 的 13px 少 1px）：传统表格是 border-collapse，
+   单元格矩形只算共享边框的一半，内容盒实际比「矩形宽 − 2×13 − 2」大 1px
+   （「二三」实测：矩形 59.03px，内容盒 32.03 ≈ 文字 32px 刚好装下）。
+   现代格子自带两根整边框，按 13px 算内容盒就只有 31px，刚好卡满的格子会被
+   text-overflow 裁成省略号。横向让出这 1px，内容盒与传统等宽、断点一致，
+   又留了 1px 余量给亚像素误差。 */
 .live-preview .CodeMirror-line .cm-tbl-cell {
   display: inline-block;
   white-space: nowrap;
-  padding: 4px 8px;
+  padding: 5.5px 12px;
   border: 1px solid #d1d9e0;
   background: #ffffff;
   box-sizing: border-box;
   vertical-align: top;
+  /* 行距取传统预览的值（1.5），不用编辑器的 1.7：单元格里的换行、<br> 段落
+     之间的间距都按它排，行高才与传统一致。 */
+  line-height: var(--cm-tbl-lineh);
   /* 宽度由 JS 按列算好后注入，这里禁止折行兜底：
      宁可略微溢出，也不要某一格变成两行、把整行撑高 */
   white-space: nowrap;
@@ -956,6 +972,14 @@ html {
   margin-left: -1px;
 }
 
+/* 紧凑表（列很多的宽表）：内边距收到 2px，把固定开销让给内容 ——
+   标准的 16px 内边距在十几列的表里能吃掉约 1/4 宽度，
+   窄列会被压到连一个汉字都放不下（app.js 的 TABLE_COMPACT_AVG_EM 判定） */
+.live-preview .CodeMirror-line .cm-tbl-cell.cm-tbl-compact {
+  padding-left: 2px;
+  padding-right: 2px;
+}
+
 /* 空单元格（内容区间零长度，标记里搭上了它后面那根管道符）：
    把管道符那套「1px 字号 + 负字距」还原成正常字号，盒子才是正常一行高。
    颜色仍是 transparent（来自 .cm-tbl-pipe），所以那根管道符看不见。 */
@@ -964,9 +988,13 @@ html {
   letter-spacing: normal;
 }
 
-/* 表头行 */
+/* 表头行：粗体用 600 —— 与传统模式浏览视图的 <th> 一致（github-markdown-css
+   给 th 的 font-weight 就是 600）。用 700 会比传统视图略宽，
+   刚好卡满的格子会被量成「装不下」而多折一行（「Beta 目标（建议值…）」实测：
+   700 量出 259.06px、600 只有 256.06px，而列的内容盒正好 256px）。
+   改这个值要同步 app.js 里 makeMeasurePx 的粗体字重。 */
 .live-preview .CodeMirror-line .cm-tbl-head {
-  font-weight: 700;
+  font-weight: 600;
   background: #f6f8fa;
 }
 
@@ -1022,25 +1050,72 @@ html {
    （列的 left 里已经单独算过这份偏移，这里必须清零）。 */
 .live-preview .CodeMirror-line .cm-tbl-cell.cm-tbl-abs {
   margin: 0;
-  /* 高度写死：段里可能只有空格（行盒会塌成 0），不写死盒子就会矮一截，
+  /* 段盒就是一个行高：段里可能只有空格（行盒会塌成 0），不写死盒子就会矮一截，
      叠起来会在段与段之间漏缝（实测「lead<br> 」那格最后一段只有 10px 高）。 */
-  height: var(--cm-tbl-cellh);
+  height: var(--cm-tbl-lineh);
+  /* 内边距归零：整行 13px 的非内容高度只在整行最外两条边上给一次
+     （见下），每段再各带一份的话行距会被放大成「行高 + 内边距」，行高整体偏高 */
+  padding-top: 0;
+  padding-bottom: 0;
   /* 横线只画在整格的最外两条边上：段是叠着的，内部再画就成了格中格 */
   border-top-width: 0;
   border-bottom-width: 0;
-  /* 不画边框的那一侧补回 1px 内边距，让每段的文字都从盒子顶边下 5px 开始，
-     边框 + 内边距 = 5px，段与段之间的文字才在同一水平线上 */
-  padding-top: 5px;
-  padding-bottom: 5px;
 }
-.live-preview .CodeMirror-line .cm-tbl-cell.cm-tbl-top { border-top-width: 1px; padding-top: 4px; }
-.live-preview .CodeMirror-line .cm-tbl-cell.cm-tbl-bottom { border-bottom-width: 1px; padding-bottom: 4px; }
+/* 整行顶边那一格：盒子从行顶起算（top 由这条规则定，生成的段顶规则用
+   :not(.cm-tbl-top) 让开），多出的 vpad/2 走内边距 —— 首行文字落点
+   与传统 td 的「上边框 1px + 上内边距 6px」一致，横线正好压在行顶。
+   --lmd-c 是本格的「居中下移量」（比整行矮的格子按传统 td 的 middle 对齐
+   往下让出的空间，由 app.js 按格注入，见 refreshTableMarks）：
+   首段盒子要从行顶一直罩到本段文字下方，高度与内边距都要加上它。 */
+.live-preview .CodeMirror-line .cm-tbl-cell.cm-tbl-abs.cm-tbl-top {
+  /* 盒子顶压在**逻辑行**行顶：--lmd-lt 是本物理行行顶的行内坐标的负值
+     （单物理行逻辑行没有这个变量，取默认 0 = 行内坐标原点）。 */
+  top: var(--lmd-lt, 0px);
+  border-top-width: 1px;
+  height: calc(var(--cm-tbl-vpad) / 2 + var(--lmd-c, 0px) + var(--cm-tbl-lineh));
+  padding-top: calc(var(--cm-tbl-vpad) / 2 + var(--lmd-c, 0px) - 1px);
+}
+/* 整行底边那一格：高度由 .cm-tbl-lasth<k> / 按格上移规则拉到行底，
+   横线就画在盒子底边，位置与传统 td 一致。 */
+.live-preview .CodeMirror-line .cm-tbl-cell.cm-tbl-abs.cm-tbl-bottom {
+  border-bottom-width: 1px;
+}
 
-/* 只有一段的格子：撑满整行，与旁边换行的那格一样高 */
-.live-preview .CodeMirror-line .cm-tbl-cell.cm-tbl-full { height: 100%; }
+/* 只有一段的格子：撑满整行，内容垂直居中（传统模式 td 默认 middle 对齐，
+   与现代模式其余格的顶部对齐不同 —— 通高格居中才对得上传统效果）。
+   落点按传统实测反推：整行高 H = 24N + 13 时，传统 td 的 middle 对齐把
+   「行高 + 上下内边距 + 边框」整块居中，单行格文字落在 rowTop + 12(N−1) + 7.5。
+   flex 居中给的是 (H − 边框 − 行高)/2 + 边框，比它高 1px，靠 padding-top 校准：
+   取值 0 时实测与传统逐像素相等（改动这个值要重新量，见 scripts/repro-sbs.mjs）。 */
+.live-preview .CodeMirror-line .cm-tbl-cell.cm-tbl-full {
+  height: 100%;
+  display: inline-flex;
+  align-items: center;
+  padding-top: 0;
+}
+/* 通高格同时带整行上下边框时，高度仍要是「撑满整行」而不是一个行高
+   （选择器比 .cm-tbl-abs.cm-tbl-top 更长，压得住它那条 height 与 padding-top） */
+.live-preview .CodeMirror-line .cm-tbl-cell.cm-tbl-abs.cm-tbl-top.cm-tbl-bottom.cm-tbl-full {
+  height: 100%;
+  padding-top: 0;
+}
+
+/* 被上移到逻辑行行首的尾部格（单段）：盒子要从**逻辑行行顶**通到行底，
+   内容垂直居中（对齐传统 td 的 middle）。
+   段顶规则给的是 vpad/2 + k×行距（行首那半个 vpad 的上内边距），而上移后的
+   行顶在段顶再往上半个 vpad —— 所以这里用 top:-vpad/2 抵消，
+   配合按格规则给的高度（vpad + 剩几段×行距）正好铺满整行。 */
+.live-preview .CodeMirror-line .cm-tbl-cell.cm-tbl-abs.cm-tbl-vmid {
+  top: calc(-1 * var(--cm-tbl-vpad) / 2);
+  display: inline-flex;
+  align-items: center;
+}
 
 /* 空行（相邻两个 <br>）：由就近那个 <br> 顶格子的外形，里面的字面量 <br> 藏掉 */
 .live-preview .CodeMirror-line .cm-tbl-gap { color: transparent; }
+
+/* 跨行逻辑行的填充格定位基准（app.js 的 addFillerCell） */
+.live-preview .CodeMirror-line.cm-tbl-crel { position: relative; }
 
 /* ============================================================
    数据行右侧的「…」行菜单

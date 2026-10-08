@@ -7,7 +7,17 @@
   <meta http-equiv="Pragma" content="no-cache">
   <meta http-equiv="Expires" content="0">
   <title>MarkdownLite - GitHub 风格 Markdown 工作台</title>
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/github-markdown-css@5/github-markdown.min.css">
+  <!--
+    三方库一律从本地 vendor/ 加载，**不要改回 CDN**：本工具会部署到不能上网的机器上，
+    离线时 CDN 的 <link>/<script> 全部加载失败，window.marked 变成 undefined，
+    客户端重渲染（打开文件 / 切模式 / 退出编辑）就会抛
+    "Cannot read properties of undefined (reading 'parse')"。
+    vendor/ 里的文件是上游 min 产物的原样副本（未做任何改动），路径按上游包内目录组织，
+    只是去掉了版本号与 lib/ 这类无信息量的层级。
+    升级某个库：按行尾注释里的上游包取新版本覆盖同名文件，再把该行 ?v= 的数字加一
+    （与 app.js?v= / style.css?v= 同一套缓存戳约定）。
+  -->
+  <link rel="stylesheet" href="vendor/github-markdown-css/github-markdown.min.css?v=1"><!-- github-markdown-css@5.9.0 -->
   <!--
     这里有意不引 CodeMirror 主题：codemirror@5 的 npm 包里 theme/ 只有 65 个主题、
     没有 github（引 theme/github.min.css 会 404）。编辑器配色由 style.css 里的
@@ -15,8 +25,8 @@
     继续带 cm-s-github 类 —— 一旦摘掉，CodeMirror 会换成 cm-s-default，
     基础主题那批 .cm-s-default .cm-* 颜色就会生效，反而改变现有观感。
   -->
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/codemirror@5/lib/codemirror.min.css">
-  <link rel="stylesheet" href="style.css?v=34">
+  <link rel="stylesheet" href="vendor/codemirror/codemirror.min.css?v=1"><!-- codemirror@5.65.21 -->
+  <link rel="stylesheet" href="style.css?v=46">
 </head>
 <body>
   <div class="app">
@@ -122,16 +132,17 @@
     </div>
   </div>
 
-  <script src="https://cdn.jsdelivr.net/npm/codemirror@5/lib/codemirror.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/codemirror@5/addon/mode/overlay.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/codemirror@5/addon/selection/active-line.min.js"></script>
+  <!-- 三方库走本地 vendor/，见文件顶部说明；行尾注释是上游包，升级时按它对版本 -->
+  <script src="vendor/codemirror/codemirror.min.js?v=1"></script><!-- codemirror@5.65.21 -->
+  <script src="vendor/codemirror/addon/mode/overlay.min.js?v=1"></script><!-- 同上 -->
+  <script src="vendor/codemirror/addon/selection/active-line.min.js?v=1"></script><!-- 同上 -->
   <!-- 列表自动续行：回车后保留 - / * / 1. / 任务框 的前缀（现代模式绑定 Enter） -->
-  <script src="https://cdn.jsdelivr.net/npm/codemirror@5/addon/edit/continuelist.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/codemirror@5/mode/markdown/markdown.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/codemirror@5/mode/gfm/gfm.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/marked@12/marked.min.js"></script>
+  <script src="vendor/codemirror/addon/edit/continuelist.min.js?v=1"></script><!-- 同上 -->
+  <script src="vendor/codemirror/mode/markdown/markdown.min.js?v=1"></script><!-- 同上 -->
+  <script src="vendor/codemirror/mode/gfm/gfm.min.js?v=1"></script><!-- 同上 -->
+  <script src="vendor/mermaid/mermaid.min.js?v=1"></script><!-- mermaid@11.17.2 -->
+  <script src="vendor/marked/marked.min.js?v=1"></script><!-- marked@12.0.2 -->
   <script src="md-render.js?v=5"></script>
-  <script src="app.js?v=59"></script>
+  <script src="app.js?v=82"></script>
 </body>
 </html>

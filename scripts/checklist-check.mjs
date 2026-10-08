@@ -189,32 +189,48 @@ const rows = () => page.evaluate(() => [...document.querySelectorAll('.CodeMirro
         const cls = b.className;
         const colM = cls.match(/cm-tbl-c(\d+)/);
         const segM = cls.match(/cm-tbl-seg(\d+)/);
+        // 盒子的文字行盒顶（Range 实测）：段的盒顶含整行外侧那半份内边距/边框，
+        // 只有文字位置才直接反映行距，核对「各段相差一个行距」要看它
+        let textY = -1;
+        try {
+          const range = document.createRange();
+          range.selectNodeContents(b);
+          const rects = [...range.getClientRects()].filter((r) => r.height > 1);
+          if (rects.length) textY = Math.round(Math.min(...rects.map((r) => r.top)));
+        } catch (e) { /* 忽略 */ }
         return {
           col: colM ? Number(colM[1]) : -1,
           seg: segM ? Number(segM[1]) : -1,
           full: cls.includes('cm-tbl-full'),
           x: Math.round(br.x), y: Math.round(br.y), w: Math.round(br.width), h: Math.round(br.height),
+          textY,
         };
       }),
     };
   }));
 
 // ---------- R1–R3：换行渲染 ----------
+// 几何基准 = 传统模式「浏览」视图的 HTML 表格（见 style.css 的 --cm-tbl-lineh
+// / --cm-tbl-vpad）：单元格行距 24px，整行高 = 24N + 13（N = 该行文字行数）。
 await setDoc(TABLE);
 {
   const R = await rows();
   const rowOf = (frag) => R.find((r) => r.text.includes(frag));
-  check('R1', '两行格子行高 = 74px', rowOf('a<br>b')?.h === 74, `实际 ${rowOf('a<br>b')?.h}`);
-  check('R2', '四个 <br>（含空行）行高 = 149px', rowOf('空')?.h === 149, `实际 ${rowOf('空')?.h}`);
-  const segY = rowOf('m1').boxes.filter((b) => b.col === 0).sort((a, b) => a.seg - b.seg).map((b) => b.y);
-  check('R2', '各段依次相差 37px（空行占整行）',
-    segY.length === 3 && segY[1] - segY[0] === 37 && segY[2] - segY[1] === 37, `y = ${segY.join(',')}`);
+  check('R1', '两行格子行高 = 61px（24×2 + 13）', rowOf('a<br>b')?.h === 61, `实际 ${rowOf('a<br>b')?.h}`);
+  check('R2', '四个 <br>（含空行）行高 = 109px（24×4 + 13）', rowOf('空')?.h === 109, `实际 ${rowOf('空')?.h}`);
+  // 行距看**文字**位置：段盒顶含整行外侧那半份内边距+边框，
+  // 首段盒子比后续段高出 6.5px，按盒顶算出来的间距不是行距。
+  const segTextY = rowOf('m1').boxes.filter((b) => b.col === 0)
+    .sort((a, b) => a.seg - b.seg).map((b) => b.textY);
+  check('R2', '各段文字依次相差 24px（空行占整行）',
+    segTextY.length === 3 && segTextY[1] - segTextY[0] === 24 && segTextY[2] - segTextY[1] === 24,
+    `textY = ${segTextY.join(',')}`);
   const plainX = rowOf('a1').boxes.filter((b) => b.seg === -1).map((b) => b.x).sort((a, b) => a - b);
   const multiX = rowOf('a<br>b').boxes.filter((b) => b.seg === 0).map((b) => b.x).sort((a, b) => a - b);
   check('R3', '多行行的列与普通行对齐', JSON.stringify(plainX) === JSON.stringify(multiX),
     `普通 ${plainX} / 多行 ${multiX}`);
   const fulls = rowOf('a<br>b').boxes.filter((b) => b.full);
-  check('R3', '同行单行格撑满整行高（74px）', fulls.length === 2 && fulls.every((b) => b.h === 74),
+  check('R3', '同行单行格撑满整行高（61px）', fulls.length === 2 && fulls.every((b) => b.h === 61),
     fulls.map((b) => `${b.x}:${b.h}`).join(' | '));
 }
 
@@ -246,7 +262,7 @@ await setDoc(TABLE);
   await press('Control+Enter');
   const line = await getLine(3);
   const grew = (await rows()).find((r) => r.text === line);
-  check('R5', 'Ctrl+Enter 后该行变三行高 112px', grew?.h === 112, `${JSON.stringify(line)} -> ${grew?.h}`);
+  check('R5', 'Ctrl+Enter 后该行变三行高 85px（24×3 + 13）', grew?.h === 85, `${JSON.stringify(line)} -> ${grew?.h}`);
   await setDoc(TABLE);
   await page.evaluate(`(() => {
     const c = ${CM};

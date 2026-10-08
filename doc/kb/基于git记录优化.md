@@ -682,20 +682,24 @@ return marked.parse(
 
 **为什么必须这样做**：开发时反复调试，浏览器会缓存旧的 `app.js`，导致"改了代码看不到效果"；`?v=` 是绕过该问题的最低成本方案（本项目**无构建工具**，没有 hash 文件名可用）。**新增前端资源时也要带 `?v=1` 并在每次修改后递增。**
 
-### 5.4 CDN 依赖锁版本
+### 5.4 CDN 依赖锁版本 —— **已于 2026-10-08 废止，改为本地 `public/vendor/`**
 
-`LightMDKit/public/index.html:10,18,103-111` 全部使用 **jsDelivr + 大版本锁定**：
+> **这一节记录的是曾经的做法，不要再照它去做。** 当时 `index.html` 全部使用
+> **jsDelivr + 大版本锁定**：`github-markdown-css@5`、`codemirror@5`、`mermaid@11`、`marked@12`，
+> 并让 `package.json` 的 `marked: ^12.0.0` 与 CDN 大版本对齐。
+>
+> 废止原因：本工具会部署到**不能上网**的机器上，CDN 一旦不可达，`<script>` 全部失败、
+> `window.marked` 变 `undefined`，客户端重渲染抛
+> `Cannot read properties of undefined (reading 'parse')`。
+>
+> 现做法：10 个文件全部本地化在 `public/vendor/`，版本由行尾注释锁定到具体版本
+> （`codemirror@5.65.21` / `mermaid@11.17.2` / `marked@12.0.2` / `github-markdown-css@5.9.0`），
+> 断网验收见 `scripts/offline-check.mjs`。详见 [仓库依赖](./仓库依赖.md) 的「前端三方资源清单」与
+> [排障指南](./技术知识库/排障指南.md) 3.13 节。
 
-| 依赖 | 版本 | 用途 |
-|------|------|------|
-| `github-markdown-css` | `@5` | Markdown 正文 GitHub 风格 |
-| `codemirror` | `@5` | 编辑器内核 + `mode/markdown`、`mode/gfm`、`addon/mode/overlay`、`addon/selection/active-line`、**`addon/edit/continuelist`** |
-| `mermaid` | `@11` | 图表渲染 |
-| `marked` | `@12` | Markdown 解析 |
-
-同时 `package.json` 里 `marked: ^12.0.0`、`express: ^4.18.2` **与 CDN 大版本对齐**，避免前后端解析行为不一致。
-
-**但要注意**：大版本锁定 ≠ 子路径存在（§2.9 的 `theme/github.min.css` 404）。**引入新的 CDN 资源后必须在浏览器 Network 面板确认 200**。
+**唯一仍然适用的一条**（下一节 §2.9 的教训）：**"大版本锁定"从来不保证具体子路径存在**
+（当初 `codemirror@5/theme/github.min.css` 就 404 过）。本地化之后这条依然成立 ——
+`vendor/` 里的路径同样是手写的，改了引用就要在 Network 面板确认 200，别只靠"文件我拷进去了"。
 
 ### 5.5 浏览器 API 可用性判断清单
 
@@ -865,5 +869,5 @@ git log --oneline -S "<函数名>" --all
   - `md-render.js` 的四个纯函数（`preserveIndent` / `normalizeTableDelimiters` / `mergeTableCells` / `patchStrikethrough`）是本仓库所有渲染问题的**唯一收敛点**，也是投入产出比最高的单测切入点；
   - 表格系列修复（§2.12）是"改解析/渲染逻辑必须回归已知场景"的最佳教材，五条修复串起来就是一份表格回归清单；
   - `69f1dc0`「读 CM5 源码确认拦截点」的做法，是处理"第三方库内部行为与我们的假设不符"时的正确姿态。
-- **最鲜明的工程习惯**：本地资源 `?v=` 按文件精确 bump、CDN 大版本锁定、浏览器 API 全面降级、改动 `public/` 后必须重新打包 exe、提交信息里写清验证方式。
+- **最鲜明的工程习惯**：本地资源 `?v=` 按文件精确 bump（含 `vendor/` 下的三方库）、浏览器 API 全面降级、改动 `public/` 后必须重新打包 exe、提交信息里写清验证方式。（原先还有一条「CDN 大版本锁定」，已于 2026-10-08 废止 —— 三方库改为 `public/vendor/` 本地化并锁定到具体版本，见 §5.4。）
 - **最大的改进空间**：`app.js` 单文件 2154 行（表格那 600 行最适合先拆）、零自动化测试、`dist/*.exe` 40MB 入库。
