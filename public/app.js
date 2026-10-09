@@ -239,15 +239,6 @@
     cmEditor.getWrapperElement().style.display = 'none';
     cmEditor.refresh();
 
-    // 初始化 Mermaid
-    if (typeof mermaid !== 'undefined') {
-      mermaid.initialize({
-        startOnLoad: false,
-        theme: 'default',
-        securityLevel: 'loose',
-      });
-    }
-
     // 监听编辑器内容变化
     cmEditor.on('change', () => {
       currentMarkdownText = cmEditor.getValue();
@@ -266,8 +257,23 @@
 
     bindTableClickFix();   // 修正表格行里鼠标点击的光标落点
   } catch (e) {
-    console.warn('CodeMirror/Mermaid init failed, falling back to textarea:', e);
+    console.warn('CodeMirror init failed, falling back to textarea:', e);
     cmEditor = null;
+  }
+
+  // Mermaid 初始化跟 CodeMirror 分开 try/catch：二者互不依赖，谁失败都不该连累对方。
+  // 曾经它们共用一个 try/catch，Mermaid 一抛错就会执行到 catch 里的 cmEditor = null，
+  // 把刚建好的编辑器一并丢掉 —— 表现就是「编辑器未就绪，无法进入现代模式」。
+  try {
+    if (typeof mermaid !== 'undefined') {
+      mermaid.initialize({
+        startOnLoad: false,
+        theme: 'default',
+        securityLevel: 'loose',
+      });
+    }
+  } catch (e) {
+    console.warn('Mermaid init failed:', e);
   }
 
   function setStatus(msg, type = '') {

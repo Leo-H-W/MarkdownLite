@@ -262,6 +262,65 @@ check('C3', 'marked 缺失时原文仍在（纯文本降级，内容不丢）',
   html.includes('ap_num_fanwei') || html.includes('ap&#95;num&#95;fanwei') || html.includes('1,047'),
   html.slice(0, 200));
 
+// ---------- D. Mermaid 初始化失败不连累编辑器（复刻「离线机器点现代模式报编辑器未就绪」） ----------
+
+// 现场：离线 / 老浏览器机器上 Mermaid 初始化失败（缺 API、资源损坏等）。
+// 修复前它与 CodeMirror 共用 try/catch，Mermaid 一抛错就执行到 catch 里的
+// cmEditor = null，把刚建好的编辑器一并丢掉 —— 页面静默退回传统模式，
+// 点「现代模式」得到「编辑器未就绪，无法进入现代模式」。
+const dErrors = [];
+const dWarns = [];
+const dPage = await context.newPage();
+dPage.on('pageerror', (e) => dErrors.push(e.message));
+dPage.on('console', (m) => { if (m.type() === 'warning') dWarns.push(m.text()); });
+await dPage.addInitScript(initScript, { dir: DIR });
+await dPage.addInitScript(() => {
+  // mermaid.min.js 总在页面脚本之前把自己挂到 window.mermaid，这里拦这次赋值，
+  // 只把 initialize 换成会抛错的版本 —— 模拟「库在、但初始化失败」。
+  let inner;
+  Object.defineProperty(window, 'mermaid', {
+    configurable: true,
+    get() { return inner; },
+    set(v) {
+      if (v && typeof v === 'object') {
+        v.initialize = () => { throw new Error('offline-check: simulated mermaid init failure'); };
+      }
+      inner = v;
+    },
+  });
+});
+await dPage.goto(BASE, { waitUntil: 'load' });
+await dPage.waitForTimeout(800);
+
+const dLoad = await dPage.evaluate(() => ({
+  cmDom: !!document.querySelector('.CodeMirror'),
+  label: ((document.querySelector('#btn-mode .switch-label') || {}).textContent || '').trim(),
+}));
+check('D1', 'Mermaid 初始化失败后 CodeMirror 仍在、首屏仍进现代模式',
+  dLoad.cmDom === true && dLoad.label === '现代模式', JSON.stringify(dLoad));
+
+await dPage.click('#btn-load-folder');
+await dPage.waitForTimeout(1100);
+await dPage.evaluate(() => document.querySelector('.file-item[data-path="table.md"]').click());
+await dPage.waitForTimeout(700);
+
+const dBefore = dErrors.length;
+await dPage.click('#btn-mode');            // 现代 → 传统，会触发 renderMermaid
+await dPage.waitForTimeout(900);
+const dClick = await dPage.evaluate(() => ({
+  label: ((document.querySelector('#btn-mode .switch-label') || {}).textContent || '').trim(),
+  status: ((document.querySelector('#status') || {}).textContent || '').trim(),
+}));
+check('D2', 'Mermaid 失败时照样能切模式，不报「编辑器未就绪」',
+  dClick.label === '传统模式' && !dClick.status.includes('编辑器未就绪'), JSON.stringify(dClick));
+check('D3', '失败只记到 Mermaid 头上，没冤枉 CodeMirror',
+  dWarns.some((w) => w.startsWith('Mermaid init failed:'))
+    && !dWarns.some((w) => w.includes('CodeMirror init failed')),
+  dWarns.join(' | '));
+check('D4', 'Mermaid 失败没有连带页面 JS 报错', dErrors.length === dBefore, dErrors.slice(dBefore).join(' | '));
+errors.push(...dErrors);
+await dPage.close();
+
 // ---------- 收尾 ----------
 
 await context.close();
